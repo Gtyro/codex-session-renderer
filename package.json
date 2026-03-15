@@ -1,0 +1,21 @@
+{
+  "name": "codex-session-renderer",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Render Codex session JSONL files to markdown and PNG snapshots.",
+  "bin": {
+    "codex-session-renderer": "./src/cli.js"
+  },
+  "scripts": {
+    "render": "node ./src/cli.js",
+    "install:browser": "playwright install chromium"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "markdown-it": "^14.1.1",
+    "playwright": "^1.58.2"
+  }
+}
