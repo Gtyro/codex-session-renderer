@@ -5,7 +5,8 @@
   "type": "module",
   "description": "Render Codex session JSONL files to markdown and PNG snapshots.",
   "bin": {
-    "codex-session-renderer": "./src/cli.js"
+    "codex-session-renderer": "./src/cli.js",
+    "csr": "./src/cli.js"
   },
   "scripts": {
     "render": "node ./src/cli.js",

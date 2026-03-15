@@ -8,10 +8,17 @@ import { loadSession, selectRecentRounds, splitSessionIntoRounds } from "./lib/s
 import { sessionToMarkdown } from "./lib/markdown.js";
 import { renderMarkdownDocument, screenshotHtmlWithOptions } from "./lib/render.js";
 
+const CLI_COMMANDS = ["codex-session-renderer", "csr"];
+const COMPLETION_SHELLS = ["bash", "zsh", "fish"];
+
 function printHelp() {
+  const commandExamples = CLI_COMMANDS.flatMap((command) => [
+    `  ${command} --latest [options]`,
+    `  ${command} --id <session-id> [options]`
+  ]).join("\n");
+
   console.log(`Usage:
-  codex-session-renderer --latest [options]
-  codex-session-renderer --id <session-id> [options]
+${commandExamples}
 
 Options:
   --latest                  Render the latest session file
@@ -26,7 +33,8 @@ Options:
   --include-context         Keep injected AGENTS/environment context messages
   --include-developer       Keep developer messages
   --include-reasoning       Keep reasoning summaries when present
-  --help                    Show this help message
+  --print-completion <sh>   Print a completion script for bash, zsh, or fish
+  --help, -h                Show this help message
 `);
 }
 
@@ -48,7 +56,8 @@ function parseArgs(argv) {
     onlyImages: false,
     includeContext: false,
     includeDeveloper: false,
-    includeReasoning: false
+    includeReasoning: false,
+    printCompletion: null
   };
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -96,6 +105,13 @@ function parseArgs(argv) {
       case "--include-reasoning":
         options.includeReasoning = true;
         break;
+      case "--print-completion":
+        index += 1;
+        options.printCompletion = argv[index] ?? fail("Missing value after --print-completion");
+        if (!COMPLETION_SHELLS.includes(options.printCompletion)) {
+          fail(`Unsupported shell for --print-completion: ${options.printCompletion}`);
+        }
+        break;
       case "--help":
       case "-h":
         printHelp();
@@ -118,15 +134,137 @@ function parseArgs(argv) {
     fail("--rounds must be an integer greater than or equal to 1.");
   }
 
-  if (!options.latest && !options.id) {
+  if (!options.printCompletion && !options.latest && !options.id) {
     options.latest = true;
   }
 
   return options;
 }
 
+function getBashCompletionScript() {
+  const optionWords = [
+    "--latest",
+    "--id",
+    "--sessions-dir",
+    "--output-dir",
+    "--width",
+    "--rounds",
+    "--all",
+    "--clean-output",
+    "--only-images",
+    "--include-context",
+    "--include-developer",
+    "--include-reasoning",
+    "--print-completion",
+    "--help",
+    "-h"
+  ].join(" ");
+
+  const shellWords = COMPLETION_SHELLS.join(" ");
+  const commandWords = CLI_COMMANDS.join(" ");
+
+  return `
+_codex_session_renderer_complete() {
+  local cur prev
+  cur="\${COMP_WORDS[COMP_CWORD]}"
+  prev="\${COMP_WORDS[COMP_CWORD-1]}"
+  local opts="${optionWords}"
+  local shells="${shellWords}"
+
+  case "$prev" in
+    --print-completion)
+      COMPREPLY=( $(compgen -W "$shells" -- "$cur") )
+      return 0
+      ;;
+    --sessions-dir|--output-dir)
+      COMPREPLY=( $(compgen -d -- "$cur") )
+      return 0
+      ;;
+    --id|--width|--rounds)
+      COMPREPLY=()
+      return 0
+      ;;
+  esac
+
+  if [[ "$cur" == -* ]]; then
+    COMPREPLY=( $(compgen -W "$opts" -- "$cur") )
+    return 0
+  fi
+
+  COMPREPLY=()
+}
+
+complete -F _codex_session_renderer_complete ${commandWords}
+`.trimStart();
+}
+
+function getZshCompletionScript() {
+  return `
+_codex_session_renderer_complete() {
+  _arguments -s \\
+    '--latest[Render the latest session file]' \\
+    '--id[Render a specific session by ID or unique ID fragment]:session id:' \\
+    '--sessions-dir[Override the default sessions dir]:sessions directory:_files -/' \\
+    '--output-dir[Write files into this directory (default: ./output)]:output directory:_files -/' \\
+    '--width[Screenshot viewport width in pixels (default: 1440)]:width:' \\
+    '--rounds[Include only the most recent n conversation rounds (default: 1)]:round count:' \\
+    '--all[Include the whole session instead of only recent rounds]' \\
+    '--clean-output[Remove existing files in the output directory before rendering]' \\
+    '--only-images[Save only final PNG images and skip markdown/html artifacts]' \\
+    '--include-context[Keep injected AGENTS/environment context messages]' \\
+    '--include-developer[Keep developer messages]' \\
+    '--include-reasoning[Keep reasoning summaries when present]' \\
+    '--print-completion[Print a completion script]:shell:(${COMPLETION_SHELLS.join(" ")})' \\
+    '--help[Show this help message]' \\
+    '-h[Show this help message]'
+}
+
+compdef _codex_session_renderer_complete ${CLI_COMMANDS.join(" ")}
+`.trimStart();
+}
+
+function getFishCompletionScript() {
+  return `
+for cmd in ${CLI_COMMANDS.join(" ")}
+  complete -c $cmd -l latest -d "Render the latest session file"
+  complete -c $cmd -l id -r -d "Render a specific session by ID or unique ID fragment"
+  complete -c $cmd -l sessions-dir -r -a "(__fish_complete_directories)" -d "Override the default sessions dir"
+  complete -c $cmd -l output-dir -r -a "(__fish_complete_directories)" -d "Write files into this directory"
+  complete -c $cmd -l width -r -d "Screenshot viewport width in pixels"
+  complete -c $cmd -l rounds -r -d "Include only the most recent n conversation rounds"
+  complete -c $cmd -l all -d "Include the whole session instead of only recent rounds"
+  complete -c $cmd -l clean-output -d "Remove existing files in the output directory before rendering"
+  complete -c $cmd -l only-images -d "Save only final PNG images and skip markdown/html artifacts"
+  complete -c $cmd -l include-context -d "Keep injected AGENTS/environment context messages"
+  complete -c $cmd -l include-developer -d "Keep developer messages"
+  complete -c $cmd -l include-reasoning -d "Keep reasoning summaries when present"
+  complete -c $cmd -l print-completion -r -a "${COMPLETION_SHELLS.join(" ")}" -d "Print a completion script"
+  complete -c $cmd -l help -s h -d "Show this help message"
+end
+`.trimStart();
+}
+
+function getCompletionScript(shell) {
+  switch (shell) {
+    case "bash":
+      return getBashCompletionScript();
+    case "zsh":
+      return getZshCompletionScript();
+    case "fish":
+      return getFishCompletionScript();
+    default:
+      fail(`Unsupported shell: ${shell}`);
+  }
+}
+
 async function main() {
   const options = parseArgs(process.argv.slice(2));
+
+  if (options.printCompletion) {
+    console.log(getCompletionScript(options.printCompletion));
+    return;
+  }
+
   const sessionFile = await resolveSessionFile({
     sessionsDir: options.sessionsDir,
     latest: options.latest,

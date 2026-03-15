@@ -16,6 +16,37 @@ npm install
 npm run install:browser
 ```
 
+## Global CLI
+
+Install the CLI globally from GitHub:
+
+```bash
+npm install -g git+https://github.com/Gtyro/codex-session-renderer.git#main
+```
+
+After installation, both of these commands work from any directory:
+
+```bash
+codex-session-renderer --latest
+csr --latest
+```
+
+`csr` is the short alias for day-to-day use.
+
+If this machine does not already have a Playwright Chromium install, run:
+
+```bash
+npx playwright install chromium
+```
+
+To remove the global install later:
+
+```bash
+npm uninstall -g codex-session-renderer
+```
+
+For local development from a checkout, you can still use `npm link` in the repo root if you want global commands to point at your working tree directly.
+
 ## Usage
 
 Render the latest session:
@@ -65,6 +96,33 @@ Include normally hidden scaffolding:
 ```bash
 npm run render -- --latest --include-context --include-developer --include-reasoning
 ```
+
+The same options work through the global commands:
+
+```bash
+csr --latest --rounds 3
+csr --id 019cea6d-7660-7c51-ade7-510d2bdf3caa --all
+```
+
+## Shell Completion
+
+The CLI can print completion scripts for `bash`, `zsh`, or `fish`:
+
+```bash
+csr --print-completion bash
+csr --print-completion zsh
+csr --print-completion fish
+```
+
+Quick setup examples:
+
+```bash
+echo 'eval "$(csr --print-completion bash)"' >> ~/.bashrc
+echo 'eval "$(csr --print-completion zsh)"' >> ~/.zshrc
+echo 'source (csr --print-completion fish | psub)' >> ~/.config/fish/config.fish
+```
+
+The generated script registers completion for both `csr` and `codex-session-renderer`.
 
 ## Output
 
