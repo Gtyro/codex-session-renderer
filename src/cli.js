@@ -6,6 +6,7 @@ import process from "node:process";
 import { resolveSessionFile, getDefaultSessionsDir } from "./lib/session-store.js";
 import { loadSession, selectRecentRounds, splitSessionIntoRounds } from "./lib/session-parser.js";
 import { sessionToMarkdown } from "./lib/markdown.js";
+import { installBundledFonts } from "./lib/font-assets.js";
 import { renderMarkdownDocument, screenshotHtmlWithOptions } from "./lib/render.js";
 
 const CLI_COMMANDS = ["codex-session-renderer", "csr"];
@@ -21,6 +22,7 @@ function printHelp() {
 ${commandExamples}
 
 Options:
+  --install-fonts           Download the pinned Chinese font assets into this install
   --latest                  Render the latest session file
   --id <session-id>         Render a specific session by ID or unique ID fragment
   --sessions-dir <path>     Override the default sessions dir
@@ -45,6 +47,7 @@ function fail(message) {
 
 function parseArgs(argv) {
   const options = {
+    installFonts: false,
     latest: false,
     id: null,
     sessionsDir: getDefaultSessionsDir(),
@@ -64,6 +67,9 @@ function parseArgs(argv) {
     const arg = argv[index];
 
     switch (arg) {
+      case "--install-fonts":
+        options.installFonts = true;
+        break;
       case "--latest":
         options.latest = true;
         break;
@@ -143,6 +149,7 @@ function parseArgs(argv) {
 
 function getBashCompletionScript() {
   const optionWords = [
+    "--install-fonts",
     "--latest",
     "--id",
     "--sessions-dir",
@@ -203,6 +210,7 @@ function getZshCompletionScript() {
 _codex_session_renderer_complete() {
   _arguments -s \\
     '--latest[Render the latest session file]' \\
+    '--install-fonts[Download the pinned Chinese font assets into this install]' \\
     '--id[Render a specific session by ID or unique ID fragment]:session id:' \\
     '--sessions-dir[Override the default sessions dir]:sessions directory:_files -/' \\
     '--output-dir[Write files into this directory (default: ./output)]:output directory:_files -/' \\
@@ -226,6 +234,7 @@ compdef _codex_session_renderer_complete ${CLI_COMMANDS.join(" ")}
 function getFishCompletionScript() {
   return `
 for cmd in ${CLI_COMMANDS.join(" ")}
+  complete -c $cmd -l install-fonts -d "Download the pinned Chinese font assets into this install"
   complete -c $cmd -l latest -d "Render the latest session file"
   complete -c $cmd -l id -r -d "Render a specific session by ID or unique ID fragment"
   complete -c $cmd -l sessions-dir -r -a "(__fish_complete_directories)" -d "Override the default sessions dir"
@@ -265,6 +274,11 @@ async function main() {
     return;
   }
 
+  if (options.installFonts) {
+    await installBundledFonts();
+    return;
+  }
+
   const sessionFile = await resolveSessionFile({
     sessionsDir: options.sessionsDir,
     latest: options.latest,
@@ -280,18 +294,20 @@ async function main() {
 
   const markdown = sessionToMarkdown(session, { mode: "full" });
   const compactMarkdown = sessionToMarkdown(session, { mode: "compact" });
-  const html = renderMarkdownDocument({
-    session,
-    markdown: compactMarkdown,
-    generatedAt: new Date().toISOString(),
-    titleSuffix: "Compact"
-  });
   const roundSessions = splitSessionIntoRounds(session);
 
   await mkdir(options.outputDir, { recursive: true });
   if (options.cleanOutput) {
     await emptyDirectory(options.outputDir);
   }
+
+  const generatedAt = new Date().toISOString();
+  const html = renderMarkdownDocument({
+    session,
+    markdown: compactMarkdown,
+    generatedAt,
+    titleSuffix: "Compact"
+  });
 
   const markdownPath = path.join(options.outputDir, `${session.id}.md`);
   const compactMarkdownPath = path.join(options.outputDir, `${session.id}.compact.md`);
@@ -318,7 +334,7 @@ async function main() {
     const roundHtml = renderMarkdownDocument({
       session: roundSession,
       markdown: roundMarkdown,
-      generatedAt: new Date().toISOString(),
+      generatedAt,
       titleSuffix: `Compact ${roundLabel}`
     });
 
@@ -404,6 +420,12 @@ async function removeSessionArtifacts(outputDir, sessionId, options = {}) {
 
 main().catch((error) => {
   if (error && error.code === "PLAYWRIGHT_BROWSER_MISSING") {
+    console.error(error.message);
+    process.exit(1);
+    return;
+  }
+
+  if (error && error.code === "FONT_ASSETS_MISSING") {
     console.error(error.message);
     process.exit(1);
     return;

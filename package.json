@@ -10,6 +10,7 @@
   },
   "scripts": {
     "render": "node ./src/cli.js",
+    "install:fonts": "node ./scripts/install-fonts.js",
     "install:browser": "playwright install chromium"
   },
   "engines": {

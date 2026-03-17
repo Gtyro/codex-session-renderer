@@ -9,10 +9,15 @@ By default it only renders the most recent conversation round, where one round m
 - Node.js 18+
 - A Playwright Chromium browser install
 
+The renderer uses a pinned official `Source Han Sans SC` download for Simplified Chinese text rendering, so it does not depend on system-installed Chinese fonts after the font assets are installed once.
+By default the downloaded font files are stored in a per-user data directory instead of inside the package tree.
+On Linux that means `~/.local/share/codex-session-renderer/fonts` unless `XDG_DATA_HOME` is set.
+
 ## Setup
 
 ```bash
 npm install
+npm run install:fonts
 npm run install:browser
 ```
 
@@ -32,6 +37,14 @@ csr --latest
 ```
 
 `csr` is the short alias for day-to-day use.
+
+Download the pinned Chinese font assets into the global install:
+
+```bash
+csr --install-fonts
+```
+
+This downloads fonts into your user data directory, so it stays writable even when the package itself was installed under a root-owned global `node_modules`.
 
 If this machine does not already have a Playwright Chromium install, run:
 
@@ -53,6 +66,19 @@ Render the latest session:
 
 ```bash
 npm run render -- --latest
+```
+
+Install the pinned Chinese font assets for a local checkout:
+
+```bash
+npm run install:fonts
+```
+
+The CLI can also install fonts directly:
+
+```bash
+csr --install-fonts
+codex-session-renderer --install-fonts
 ```
 
 Render the latest 3 rounds instead of only the latest one:
@@ -103,6 +129,8 @@ The same options work through the global commands:
 csr --latest --rounds 3
 csr --id 019cea6d-7660-7c51-ade7-510d2bdf3caa --all
 ```
+
+If the font assets are missing, the renderer exits with a message telling you to run `npm run install:fonts` or `csr --install-fonts`.
 
 ## Shell Completion
 

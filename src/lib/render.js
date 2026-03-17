@@ -3,6 +3,7 @@ import MarkdownIt from "markdown-it";
 import { readdir, unlink } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import { getInstalledFontUrls } from "./font-assets.js";
 
 const markdown = new MarkdownIt({
   html: false,
@@ -18,7 +19,13 @@ function escapeHtml(value) {
     .replaceAll('"', "&quot;");
 }
 
-export function renderMarkdownDocument({ session, markdown: markdownSource, generatedAt, titleSuffix = null }) {
+export function renderMarkdownDocument({
+  session,
+  markdown: markdownSource,
+  generatedAt,
+  titleSuffix = null,
+  fontUrls = getInstalledFontUrls()
+}) {
   const body = markdown.render(markdownSource);
   const subtitle = [
     session.startedAt ? `Started ${session.startedAt}` : null,
@@ -27,7 +34,6 @@ export function renderMarkdownDocument({ session, markdown: markdownSource, gene
   ]
     .filter(Boolean)
     .join("  |  ");
-
   return `<!doctype html>
 <html lang="en">
   <head>
@@ -52,6 +58,22 @@ export function renderMarkdownDocument({ session, markdown: markdownSource, gene
         box-sizing: border-box;
       }
 
+      @font-face {
+        font-family: "Source Han Sans SC";
+        src: url("${escapeHtml(fontUrls.regular)}") format("opentype");
+        font-style: normal;
+        font-weight: 400;
+        font-display: swap;
+      }
+
+      @font-face {
+        font-family: "Source Han Sans SC";
+        src: url("${escapeHtml(fontUrls.bold)}") format("opentype");
+        font-style: normal;
+        font-weight: 700;
+        font-display: swap;
+      }
+
       html, body {
         margin: 0;
         padding: 0;
@@ -63,7 +85,7 @@ export function renderMarkdownDocument({ session, markdown: markdownSource, gene
       }
 
       body {
-        font-family: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", Georgia, serif;
+        font-family: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", Georgia, "Source Han Sans SC", serif;
         line-height: 1.65;
         padding: 56px 28px 72px;
       }
@@ -124,7 +146,7 @@ export function renderMarkdownDocument({ session, markdown: markdownSource, gene
       }
 
       h2, h3 {
-        font-family: "Avenir Next", "Segoe UI", sans-serif;
+        font-family: "Avenir Next", "Segoe UI", "Source Han Sans SC", sans-serif;
         letter-spacing: 0.01em;
       }
 
@@ -151,7 +173,7 @@ export function renderMarkdownDocument({ session, markdown: markdownSource, gene
       }
 
       code, pre {
-        font-family: "IBM Plex Mono", "SFMono-Regular", Consolas, monospace;
+        font-family: "IBM Plex Mono", "SFMono-Regular", "Source Han Sans SC", Consolas, monospace;
       }
 
       code {
@@ -267,6 +289,11 @@ export async function screenshotHtmlWithOptions({
 
     await page.goto(pathToFileURL(htmlPath).href, {
       waitUntil: "networkidle"
+    });
+    await page.evaluate(async () => {
+      if (document.fonts?.ready) {
+        await document.fonts.ready;
+      }
     });
 
     const totalHeight = await page.evaluate(() =>
