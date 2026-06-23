@@ -1,23 +1,112 @@
 {
   "name": "codex-session-renderer",
-  "version": "0.1.0",
-  "private": true,
+  "version": "0.1.8",
   "type": "module",
   "description": "Render Codex session JSONL files to markdown and PNG snapshots.",
+  "publisher": "gtyro",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Gtyro/codex-session-renderer.git"
+  },
+  "homepage": "https://github.com/Gtyro/codex-session-renderer",
+  "bugs": {
+    "url": "https://github.com/Gtyro/codex-session-renderer/issues"
+  },
+  "engines": {
+    "node": ">=18",
+    "vscode": "^1.95.0"
+  },
   "bin": {
     "codex-session-renderer": "./src/cli.js",
     "csr": "./src/cli.js"
   },
+  "main": "./vscode/extension.cjs",
+  "categories": [
+    "Other"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "codexSessionRenderer.openBrowser",
+        "title": "Codex Session Renderer: Open Session Browser"
+      },
+      {
+        "command": "codexSessionRenderer.openLatestPreview",
+        "title": "Codex Session Renderer: Open Latest Preview"
+      },
+      {
+        "command": "codexSessionRenderer.copyBrowserUrl",
+        "title": "Codex Session Renderer: Copy Browser URL"
+      },
+      {
+        "command": "codexSessionRenderer.stopServer",
+        "title": "Codex Session Renderer: Stop Session Browser"
+      },
+      {
+        "command": "codexSessionRenderer.runSelfCheck",
+        "title": "Codex Session Renderer: Run Developer Self-Check"
+      }
+    ],
+    "menus": {
+      "commandPalette": [
+        {
+          "command": "codexSessionRenderer.runSelfCheck",
+          "when": "config.codexSessionRenderer.showDeveloperCommands"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Codex Session Renderer",
+      "properties": {
+        "codexSessionRenderer.host": {
+          "type": "string",
+          "default": "127.0.0.1",
+          "description": "Host used for the local session browser server."
+        },
+        "codexSessionRenderer.port": {
+          "type": "number",
+          "default": 4311,
+          "description": "Preferred port for the local session browser server. Use 0 to select a free port."
+        },
+        "codexSessionRenderer.openMode": {
+          "type": "string",
+          "enum": [
+            "external"
+          ],
+          "default": "external",
+          "description": "How the session browser is opened. The first version always uses the external browser."
+        },
+        "codexSessionRenderer.sessionsDir": {
+          "type": "string",
+          "default": "",
+          "description": "Optional override for the sessions directory."
+        },
+        "codexSessionRenderer.archivedSessionsDir": {
+          "type": "string",
+          "default": "",
+          "description": "Optional override for the archived sessions directory."
+        },
+        "codexSessionRenderer.showDeveloperCommands": {
+          "type": "boolean",
+          "default": false,
+          "description": "Show developer-only diagnostic commands such as the internal self-check."
+        }
+      }
+    }
+  },
   "scripts": {
     "render": "node ./src/cli.js",
+    "web": "node ./src/cli.js --serve",
+    "package:vsix": "node ./scripts/package-vsix.cjs",
     "install:fonts": "node ./scripts/install-fonts.js",
     "install:browser": "playwright install chromium"
-  },
-  "engines": {
-    "node": ">=18"
   },
   "dependencies": {
     "markdown-it": "^14.1.1",
     "playwright": "^1.58.2"
+  },
+  "devDependencies": {
+    "@vscode/vsce": "2.26.0"
   }
 }

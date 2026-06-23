@@ -3,11 +3,17 @@
 import { mkdir, readdir, rm, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
-import { resolveSessionFile, getDefaultSessionsDir } from "./lib/session-store.js";
-import { loadSession, selectRecentRounds, splitSessionIntoRounds } from "./lib/session-parser.js";
-import { sessionToMarkdown } from "./lib/markdown.js";
-import { installBundledFonts } from "./lib/font-assets.js";
-import { renderMarkdownDocument, screenshotHtmlWithOptions } from "./lib/render.js";
+import {
+  getDefaultArchivedSessionsDir,
+  getDefaultSessionsDir,
+  resolveSessionFile
+} from "./core/session-store.js";
+import { loadSession, selectRecentRounds, splitSessionIntoRounds } from "./core/session-parser.js";
+import { sessionToMarkdown } from "./core/markdown.js";
+import { installBundledFonts } from "./core/font-assets.js";
+import { renderMarkdownDocument } from "./render/html.js";
+import { screenshotHtmlWithOptions } from "./render/png-playwright.js";
+import { startWebServer } from "./server/web-server.js";
 
 const CLI_COMMANDS = ["codex-session-renderer", "csr"];
 const COMPLETION_SHELLS = ["bash", "zsh", "fish"];
@@ -15,28 +21,36 @@ const COMPLETION_SHELLS = ["bash", "zsh", "fish"];
 function printHelp() {
   const commandExamples = CLI_COMMANDS.flatMap((command) => [
     `  ${command} --latest [options]`,
-    `  ${command} --id <session-id> [options]`
+    `  ${command} --id <session-id> [options]`,
+    `  ${command} --serve [options]`
   ]).join("\n");
 
   console.log(`Usage:
 ${commandExamples}
 
 Options:
-  --install-fonts           Download the pinned Chinese font assets into this install
-  --latest                  Render the latest session file
-  --id <session-id>         Render a specific session by ID or unique ID fragment
-  --sessions-dir <path>     Override the default sessions dir
-  --output-dir <path>       Write files into this directory (default: ./output)
-  --width <px>              Screenshot viewport width in pixels (default: 1440)
-  --rounds <n>              Include only the most recent n conversation rounds (default: 1)
-  --all                     Include the whole session instead of only recent rounds
-  --clean-output            Remove existing files in the output directory before rendering
-  --only-images             Save only final PNG images and skip markdown/html artifacts
-  --include-context         Keep injected AGENTS/environment context messages
-  --include-developer       Keep developer messages
-  --include-reasoning       Keep reasoning summaries when present
-  --print-completion <sh>   Print a completion script for bash, zsh, or fish
-  --help, -h                Show this help message
+  --install-fonts               Download the pinned Chinese font assets into this install
+  --serve                       Start the built-in web UI for browsing and managing sessions
+  --host <host>                 Web UI host (default: 127.0.0.1)
+  --port <port>                 Web UI port (default: 4311, use 0 for a random free port)
+  --latest                      Render the latest session file
+  --id <session-id>             Render a specific session by ID or unique ID fragment
+  --sessions-dir <path>         Override the default sessions dir
+  --archived-sessions-dir <p>   Override the default archived sessions dir
+  --output-dir <path>           Write files into this directory (default: ./output)
+  --width <px>                  Screenshot viewport width in pixels (default: 1440)
+  --rounds <n>                  Include only the most recent n conversation rounds (default: 1)
+  --all                         Include the whole session instead of only recent rounds
+  --clean-output                Remove existing files in the output directory before rendering
+  --png                         Also export PNG images for each round
+  --png-only                    Save only final PNG images and skip markdown/html artifacts
+  --only-images                 Deprecated alias for --png-only; planned removal in 0.2.0
+  --no-images                   Deprecated alias; PNG export is skipped by default and the flag is planned for removal in 0.2.0
+  --include-context             Keep injected AGENTS/environment context messages
+  --include-developer           Keep developer messages
+  --include-reasoning           Keep reasoning summaries when present
+  --print-completion <sh>       Print a completion script for bash, zsh, or fish
+  --help, -h                    Show this help message
 `);
 }
 
@@ -48,19 +62,27 @@ function fail(message) {
 function parseArgs(argv) {
   const options = {
     installFonts: false,
+    serve: false,
+    host: "127.0.0.1",
+    port: 4311,
     latest: false,
     id: null,
     sessionsDir: getDefaultSessionsDir(),
+    archivedSessionsDir: getDefaultArchivedSessionsDir(),
     outputDir: path.resolve(process.cwd(), "output"),
     width: 1440,
     rounds: 1,
     all: false,
     cleanOutput: false,
+    png: false,
+    pngOnly: false,
     onlyImages: false,
+    noImages: true,
     includeContext: false,
     includeDeveloper: false,
     includeReasoning: false,
-    printCompletion: null
+    printCompletion: null,
+    deprecatedFlags: []
   };
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -69,6 +91,17 @@ function parseArgs(argv) {
     switch (arg) {
       case "--install-fonts":
         options.installFonts = true;
+        break;
+      case "--serve":
+        options.serve = true;
+        break;
+      case "--host":
+        index += 1;
+        options.host = argv[index] ?? fail("Missing value after --host");
+        break;
+      case "--port":
+        index += 1;
+        options.port = Number.parseInt(argv[index] ?? fail("Missing value after --port"), 10);
         break;
       case "--latest":
         options.latest = true;
@@ -80,6 +113,12 @@ function parseArgs(argv) {
       case "--sessions-dir":
         index += 1;
         options.sessionsDir = path.resolve(argv[index] ?? fail("Missing value after --sessions-dir"));
+        break;
+      case "--archived-sessions-dir":
+        index += 1;
+        options.archivedSessionsDir = path.resolve(
+          argv[index] ?? fail("Missing value after --archived-sessions-dir")
+        );
         break;
       case "--output-dir":
         index += 1;
@@ -99,8 +138,18 @@ function parseArgs(argv) {
       case "--clean-output":
         options.cleanOutput = true;
         break;
+      case "--png":
+        options.png = true;
+        break;
+      case "--png-only":
+        options.pngOnly = true;
+        break;
       case "--only-images":
         options.onlyImages = true;
+        options.deprecatedFlags.push("--only-images");
+        break;
+      case "--no-images":
+        options.deprecatedFlags.push("--no-images");
         break;
       case "--include-context":
         options.includeContext = true;
@@ -132,17 +181,31 @@ function parseArgs(argv) {
     fail("Use either --latest or --id, not both.");
   }
 
+  if ((options.png || options.pngOnly || options.onlyImages) && options.deprecatedFlags.includes("--no-images")) {
+    fail("Use either --png/--png-only/--only-images or --no-images, not both.");
+  }
+
   if (!Number.isFinite(options.width) || options.width < 720) {
     fail("--width must be a number greater than or equal to 720.");
+  }
+
+  if (!Number.isFinite(options.port) || options.port < 0 || options.port > 65535) {
+    fail("--port must be an integer between 0 and 65535.");
   }
 
   if (!options.all && (!Number.isFinite(options.rounds) || options.rounds < 1)) {
     fail("--rounds must be an integer greater than or equal to 1.");
   }
 
-  if (!options.printCompletion && !options.latest && !options.id) {
+  if (!options.printCompletion && !options.serve && !options.latest && !options.id) {
     options.latest = true;
   }
+
+  const imagesOnly = options.pngOnly || options.onlyImages;
+  const renderImages = options.png || imagesOnly;
+
+  options.onlyImages = imagesOnly;
+  options.noImages = !renderImages;
 
   return options;
 }
@@ -150,15 +213,22 @@ function parseArgs(argv) {
 function getBashCompletionScript() {
   const optionWords = [
     "--install-fonts",
+    "--serve",
+    "--host",
+    "--port",
     "--latest",
     "--id",
     "--sessions-dir",
+    "--archived-sessions-dir",
     "--output-dir",
     "--width",
     "--rounds",
     "--all",
     "--clean-output",
+    "--png",
+    "--png-only",
     "--only-images",
+    "--no-images",
     "--include-context",
     "--include-developer",
     "--include-reasoning",
@@ -183,11 +253,11 @@ _codex_session_renderer_complete() {
       COMPREPLY=( $(compgen -W "$shells" -- "$cur") )
       return 0
       ;;
-    --sessions-dir|--output-dir)
+    --sessions-dir|--archived-sessions-dir|--output-dir)
       COMPREPLY=( $(compgen -d -- "$cur") )
       return 0
       ;;
-    --id|--width|--rounds)
+    --id|--width|--rounds|--host|--port)
       COMPREPLY=()
       return 0
       ;;
@@ -210,15 +280,22 @@ function getZshCompletionScript() {
 _codex_session_renderer_complete() {
   _arguments -s \\
     '--latest[Render the latest session file]' \\
+    '--serve[Start the built-in web UI]' \\
     '--install-fonts[Download the pinned Chinese font assets into this install]' \\
+    '--host[Web UI host]:host:' \\
+    '--port[Web UI port]:port:' \\
     '--id[Render a specific session by ID or unique ID fragment]:session id:' \\
     '--sessions-dir[Override the default sessions dir]:sessions directory:_files -/' \\
+    '--archived-sessions-dir[Override the archived sessions dir]:archived sessions directory:_files -/' \\
     '--output-dir[Write files into this directory (default: ./output)]:output directory:_files -/' \\
     '--width[Screenshot viewport width in pixels (default: 1440)]:width:' \\
     '--rounds[Include only the most recent n conversation rounds (default: 1)]:round count:' \\
     '--all[Include the whole session instead of only recent rounds]' \\
     '--clean-output[Remove existing files in the output directory before rendering]' \\
-    '--only-images[Save only final PNG images and skip markdown/html artifacts]' \\
+    '--png[Also export PNG images for each round]' \\
+    '--png-only[Save only final PNG images and skip markdown/html artifacts]' \\
+    '--only-images[Deprecated alias for --png-only; planned removal in 0.2.0]' \\
+    '--no-images[Deprecated alias; PNG export is skipped by default and the flag is planned for removal in 0.2.0]' \\
     '--include-context[Keep injected AGENTS/environment context messages]' \\
     '--include-developer[Keep developer messages]' \\
     '--include-reasoning[Keep reasoning summaries when present]' \\
@@ -235,15 +312,22 @@ function getFishCompletionScript() {
   return `
 for cmd in ${CLI_COMMANDS.join(" ")}
   complete -c $cmd -l install-fonts -d "Download the pinned Chinese font assets into this install"
+  complete -c $cmd -l serve -d "Start the built-in web UI"
+  complete -c $cmd -l host -r -d "Web UI host"
+  complete -c $cmd -l port -r -d "Web UI port"
   complete -c $cmd -l latest -d "Render the latest session file"
   complete -c $cmd -l id -r -d "Render a specific session by ID or unique ID fragment"
   complete -c $cmd -l sessions-dir -r -a "(__fish_complete_directories)" -d "Override the default sessions dir"
+  complete -c $cmd -l archived-sessions-dir -r -a "(__fish_complete_directories)" -d "Override the archived sessions dir"
   complete -c $cmd -l output-dir -r -a "(__fish_complete_directories)" -d "Write files into this directory"
   complete -c $cmd -l width -r -d "Screenshot viewport width in pixels"
   complete -c $cmd -l rounds -r -d "Include only the most recent n conversation rounds"
   complete -c $cmd -l all -d "Include the whole session instead of only recent rounds"
   complete -c $cmd -l clean-output -d "Remove existing files in the output directory before rendering"
-  complete -c $cmd -l only-images -d "Save only final PNG images and skip markdown/html artifacts"
+  complete -c $cmd -l png -d "Also export PNG images for each round"
+  complete -c $cmd -l png-only -d "Save only final PNG images and skip markdown/html artifacts"
+  complete -c $cmd -l only-images -d "Deprecated alias for --png-only; planned removal in 0.2.0"
+  complete -c $cmd -l no-images -d "Deprecated alias; PNG export is skipped by default and the flag is planned for removal in 0.2.0"
   complete -c $cmd -l include-context -d "Keep injected AGENTS/environment context messages"
   complete -c $cmd -l include-developer -d "Keep developer messages"
   complete -c $cmd -l include-reasoning -d "Keep reasoning summaries when present"
@@ -266,19 +350,7 @@ function getCompletionScript(shell) {
   }
 }
 
-async function main() {
-  const options = parseArgs(process.argv.slice(2));
-
-  if (options.printCompletion) {
-    console.log(getCompletionScript(options.printCompletion));
-    return;
-  }
-
-  if (options.installFonts) {
-    await installBundledFonts();
-    return;
-  }
-
+async function renderSession(options) {
   const sessionFile = await resolveSessionFile({
     sessionsDir: options.sessionsDir,
     latest: options.latest,
@@ -290,7 +362,9 @@ async function main() {
     includeDeveloper: options.includeDeveloper,
     includeReasoning: options.includeReasoning
   });
-  const session = options.all ? selectRecentRounds(loadedSession, 0) : selectRecentRounds(loadedSession, options.rounds);
+  const session = options.all
+    ? selectRecentRounds(loadedSession, 0)
+    : selectRecentRounds(loadedSession, options.rounds);
 
   const markdown = sessionToMarkdown(session, { mode: "full" });
   const compactMarkdown = sessionToMarkdown(session, { mode: "compact" });
@@ -320,7 +394,8 @@ async function main() {
   }
 
   await removeSessionArtifacts(options.outputDir, session.id, {
-    removeDocuments: options.onlyImages
+    removeDocuments: options.onlyImages,
+    removeImages: options.noImages
   });
 
   const roundArtifacts = [];
@@ -339,13 +414,17 @@ async function main() {
     });
 
     await writeFile(roundHtmlPath, roundHtml, "utf8");
-    const roundImagePaths = await screenshotHtmlWithOptions({
-      htmlPath: roundHtmlPath,
-      imagePath: roundImagePath,
-      width: options.width,
-      maxSliceHeight: 14000,
-      deviceScaleFactor: 1
-    });
+
+    let roundImagePaths = [];
+    if (!options.noImages) {
+      roundImagePaths = await screenshotHtmlWithOptions({
+        htmlPath: roundHtmlPath,
+        imagePath: roundImagePath,
+        width: options.width,
+        maxSliceHeight: 14000,
+        deviceScaleFactor: 1
+      });
+    }
 
     if (options.onlyImages) {
       await unlink(roundHtmlPath);
@@ -364,11 +443,22 @@ async function main() {
     const total = session.selection.totalRounds ?? session.selection.roundsIncluded;
     console.log(`Rounds:  last ${session.selection.roundsIncluded} of ${total}`);
   } else {
-    console.log(`Rounds:  all`);
+    console.log("Rounds:  all");
   }
+
   if (options.onlyImages) {
     console.log("Mode:    images only");
+  } else if (options.noImages) {
+    console.log("Mode:    markdown/html only");
+    console.log(`Full Markdown:    ${markdownPath}`);
+    console.log(`Compact Markdown: ${compactMarkdownPath}`);
+    console.log(`Compact HTML:     ${htmlPath}`);
+    console.log("Round HTML:");
+    roundArtifacts.forEach((artifact) => {
+      console.log(`  - ${artifact.roundLabel}: ${artifact.htmlPath}`);
+    });
   } else {
+    console.log("Mode:    markdown/html + png");
     console.log(`Full Markdown:    ${markdownPath}`);
     console.log(`Compact Markdown: ${compactMarkdownPath}`);
     console.log(`Compact HTML:     ${htmlPath}`);
@@ -377,12 +467,56 @@ async function main() {
       console.log(`  - ${artifact.roundLabel}: ${artifact.htmlPath}`);
     });
   }
-  console.log("Round Images:");
-  roundArtifacts.forEach((artifact) => {
-    artifact.imagePaths.forEach((itemPath) => {
-      console.log(`  - ${artifact.roundLabel}: ${itemPath}`);
+
+  if (!options.noImages) {
+    console.log("Round Images:");
+    roundArtifacts.forEach((artifact) => {
+      artifact.imagePaths.forEach((itemPath) => {
+        console.log(`  - ${artifact.roundLabel}: ${itemPath}`);
+      });
     });
-  });
+  }
+}
+
+async function main() {
+  const options = parseArgs(process.argv.slice(2));
+
+  if (options.deprecatedFlags.length > 0) {
+    for (const flag of options.deprecatedFlags) {
+      if (flag === "--only-images") {
+        console.warn("Warning: --only-images is deprecated and planned for removal in 0.2.0; use --png-only instead.");
+      } else if (flag === "--no-images") {
+        console.warn("Warning: --no-images is deprecated and planned for removal in 0.2.0; PNG export is skipped by default.");
+      }
+    }
+  }
+
+  if (options.printCompletion) {
+    console.log(getCompletionScript(options.printCompletion));
+    return;
+  }
+
+  if (options.installFonts) {
+    await installBundledFonts();
+    return;
+  }
+
+  if (options.serve) {
+    const webServer = await startWebServer({
+      host: options.host,
+      port: options.port,
+      sessionsDir: options.sessionsDir,
+      archivedSessionsDir: options.archivedSessionsDir
+    });
+
+    console.log(`Web UI:   ${webServer.url}`);
+    console.log(`Sessions: ${webServer.roots.sessionsDir}`);
+    console.log(`Archived: ${webServer.roots.archivedSessionsDir}`);
+    console.log("PNG export still requires Playwright Chromium; browsing and markdown/html preview do not.");
+    return;
+  }
+
+  await renderSession(options);
 }
 
 async function emptyDirectory(outputDir) {
@@ -405,20 +539,27 @@ async function removeSessionArtifacts(outputDir, sessionId, options = {}) {
     entries
       .filter(
         (entry) =>
-          entry === `${sessionId}.compact.png` ||
-          (entry.startsWith(`${sessionId}.compact-`) && entry.endsWith(".png")) ||
-          (options.removeDocuments &&
-            (entry === `${sessionId}.md` ||
-              entry === `${sessionId}.compact.md` ||
-              entry === `${sessionId}.compact.html`)) ||
-          (entry.startsWith(`${sessionId}.round-`) &&
-            (entry.endsWith(".png") || entry.endsWith(".html")))
+          ((options.removeImages &&
+            (entry === `${sessionId}.compact.png` ||
+              (entry.startsWith(`${sessionId}.compact-`) && entry.endsWith(".png")))) ||
+            (options.removeDocuments &&
+              (entry === `${sessionId}.md` ||
+                entry === `${sessionId}.compact.md` ||
+                entry === `${sessionId}.compact.html`)) ||
+            (entry.startsWith(`${sessionId}.round-`) &&
+              (entry.endsWith(".html") || entry.endsWith(".png"))))
       )
       .map((entry) => unlink(path.join(outputDir, entry)))
   );
 }
 
 main().catch((error) => {
+  if (error && (error.code === "PORT_IN_USE" || error.code === "WINDOWS_HOST_PORT_IN_USE")) {
+    console.error(error.message);
+    process.exit(1);
+    return;
+  }
+
   if (error && error.code === "PLAYWRIGHT_BROWSER_MISSING") {
     console.error(error.message);
     process.exit(1);

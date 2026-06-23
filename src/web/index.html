@@ -1,0 +1,198 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Codex Session Browser</title>
+    <link rel="stylesheet" href="/assets/styles.css">
+  </head>
+  <body>
+    <main class="workspace" data-mobile-panel="master">
+      <aside class="sidebar">
+        <div class="sidebar-head">
+          <button
+            class="icon-button tooltip-host"
+            id="sidebar-toggle"
+            type="button"
+            aria-label="收起侧栏"
+            data-tooltip="收起侧栏"
+          >
+            <svg viewBox="0 0 16 16" aria-hidden="true">
+              <path d="M10.5 3.5 6 8l4.5 4.5" />
+            </svg>
+          </button>
+          <div class="brand-block">
+            <p class="brand-kicker">Codex</p>
+            <h1>Sessions</h1>
+          </div>
+          <button
+            class="icon-button tooltip-host"
+            id="refresh-button"
+            type="button"
+            aria-label="刷新会话列表"
+            data-tooltip="刷新会话列表"
+          >
+            <svg viewBox="0 0 16 16" aria-hidden="true">
+              <path d="M13 5.5V2.8m0 0H10.2m2.8 0A5.5 5.5 0 1 0 14 8" />
+            </svg>
+          </button>
+        </div>
+
+        <label class="sidebar-search search-inline">
+          <span class="search-icon" aria-hidden="true">
+            <svg viewBox="0 0 16 16">
+              <circle cx="7" cy="7" r="4.5" />
+              <path d="m10.5 10.5 3 3" />
+            </svg>
+          </span>
+          <span class="visually-hidden">搜索会话</span>
+          <input
+            id="search-input"
+            type="search"
+            placeholder="搜索"
+            aria-label="搜索会话"
+            title="按 ID 或路径搜索会话"
+          >
+        </label>
+
+        <div class="scope-switcher" role="tablist" aria-label="Session scope">
+          <button
+            class="scope-pill tooltip-host"
+            id="scope-all"
+            type="button"
+            data-scope="all"
+            data-tooltip="显示全部会话"
+          >
+            <span>全部</span>
+            <span class="count-pill" id="all-count">0</span>
+          </button>
+          <button
+            class="scope-pill active tooltip-host"
+            id="scope-active"
+            type="button"
+            data-scope="active"
+            data-tooltip="只显示活动会话"
+          >
+            <span>活动</span>
+            <span class="count-pill" id="sessions-count">0</span>
+          </button>
+          <button
+            class="scope-pill tooltip-host"
+            id="scope-archived"
+            type="button"
+            data-scope="archived"
+            data-tooltip="只显示归档会话"
+          >
+            <span>归档</span>
+            <span class="count-pill" id="archived-count">0</span>
+          </button>
+        </div>
+
+        <div class="sidebar-summary">
+          <h2 id="master-title" title="活动会话">活动会话</h2>
+        </div>
+
+        <div class="session-list" id="session-list"></div>
+
+        <div class="sidebar-footer">
+          <details class="sidebar-meta">
+            <summary class="tooltip-host" data-tooltip="查看会话目录路径">Paths</summary>
+            <section class="path-card">
+              <p class="path-card-label">Sessions</p>
+              <p class="path-card-value" id="sessions-root">-</p>
+            </section>
+            <section class="path-card">
+              <p class="path-card-label">Archived</p>
+              <p class="path-card-value" id="archived-root">-</p>
+            </section>
+          </details>
+        </div>
+      </aside>
+
+      <section class="chat-pane">
+        <header class="chat-header">
+          <div class="chat-header-main">
+            <div class="chat-header-row">
+              <button class="mobile-back" id="back-to-list" type="button">返回列表</button>
+              <p class="status-chip" id="session-status">未选中</p>
+            </div>
+            <h2 id="session-title">选择一个会话查看预览</h2>
+            <div class="chat-subline">
+              <p class="chat-session-id" id="session-idline">-</p>
+              <p class="chat-path" id="session-path">左侧选择会话后，这里会显示对应的交互式 transcript。</p>
+            </div>
+            <div class="header-meta">
+              <span class="visually-hidden" id="session-location">-</span>
+              <div class="meta-pill compact">
+                <span>更新</span>
+                <strong id="session-modified">-</strong>
+              </div>
+              <div class="meta-pill compact">
+                <span>大小</span>
+                <strong id="session-size">-</strong>
+              </div>
+              <p class="feedback" id="feedback-message"></p>
+            </div>
+          </div>
+
+          <div class="chat-actions">
+            <a class="action-link" id="open-preview-link" href="#" target="_blank" rel="noreferrer">HTML</a>
+            <a class="action-link" id="download-compact-link" href="#" target="_blank" rel="noreferrer">Compact</a>
+            <a class="action-link" id="download-full-link" href="#" target="_blank" rel="noreferrer">Full</a>
+            <button class="header-button" id="rename-button" type="button">改名</button>
+            <button class="header-button" id="archive-button" type="button">归档</button>
+            <button class="header-button" id="restore-button" type="button">恢复</button>
+            <button class="header-button danger" id="delete-button" type="button">删除</button>
+          </div>
+        </header>
+
+        <section class="chat-toolbar">
+          <div class="toolbar-group">
+            <label class="control">
+              <span>最近轮次</span>
+              <input id="rounds-input" type="number" min="1" step="1" value="1">
+            </label>
+
+            <label class="toggle">
+              <input id="all-rounds-toggle" type="checkbox" checked>
+              <span>全部轮次</span>
+            </label>
+          </div>
+
+          <div class="toolbar-group flags">
+            <label class="toggle">
+              <input id="include-context-toggle" type="checkbox">
+              <span>Context</span>
+            </label>
+            <label class="toggle">
+              <input id="include-developer-toggle" type="checkbox">
+              <span>Developer</span>
+            </label>
+            <label class="toggle">
+              <input id="include-reasoning-toggle" type="checkbox">
+              <span>Reasoning</span>
+            </label>
+          </div>
+        </section>
+
+        <section class="chat-stage">
+          <div class="viewer-card">
+            <div class="transcript-toolbar" id="transcript-toolbar" hidden>
+              <div class="transcript-toolbar-group">
+                <button class="toolbar-button" id="expand-tools-button" type="button">展开 Tools</button>
+                <button class="toolbar-button" id="collapse-tools-button" type="button">收起 Tools</button>
+              </div>
+              <p class="transcript-stats" id="transcript-stats">-</p>
+            </div>
+            <div class="empty-state" id="empty-state">
+              <p>还没有选中会话。</p>
+            </div>
+            <div class="transcript-root" id="transcript-root"></div>
+          </div>
+        </section>
+      </section>
+    </main>
+
+    <script type="module" src="/assets/app.js"></script>
+  </body>
+</html>
