@@ -90,7 +90,7 @@ Or through the global CLI:
 csr --serve
 ```
 
-The web UI reads both `sessions` and `archived_sessions`, uses `~/.codex/session_index.jsonl` `thread_name` as the session title, lets you rename that title inline from the sidebar, archive active sessions, restore archived sessions, and permanently delete archived sessions.
+The web UI reads both `sessions` and `archived_sessions`, prefers `~/.codex/session_index.jsonl` `thread_name` for session titles and falls back to the Codex state database when needed, lets you rename titles inline from the sidebar, archive active sessions, restore archived sessions, and permanently delete archived sessions.
 Double-click a sidebar title to edit it in place, or use the `Rename` action to enter the same inline editing mode.
 When you archive or restore the currently selected session, the UI now stays on the current scope and keeps your browsing context instead of jumping to the other tab automatically.
 

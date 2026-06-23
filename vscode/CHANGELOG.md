@@ -2,7 +2,7 @@
 
 ## 0.1.8
 
-- Switched session titles and renaming to `session_index.jsonl` `thread_name` instead of renaming session files.
+- Switched session titles and renaming to metadata-backed titles instead of renaming session files, preferring `session_index.jsonl` and falling back to the Codex state database.
 - Added inline sidebar renaming so double-click edits the title in place.
 
 ## 0.1.7
@@ -41,7 +41,7 @@
 
 ### 0.1.8
 
-- 将会话标题与改名逻辑切换到 `session_index.jsonl` 的 `thread_name`，不再改动会话文件名。
+- 将会话标题与改名逻辑切换为元数据驱动，不再改动会话文件名；标题优先读取 `session_index.jsonl`，缺失时回退到 Codex 状态数据库。
 - 侧边栏新增原地改名，双击即可直接编辑标题。
 
 ### 0.1.7

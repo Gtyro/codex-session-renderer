@@ -1,12 +1,17 @@
+import { execFile as execFileCallback } from "node:child_process";
 import { copyFile, mkdir, readFile, readdir, rm, rename, rmdir, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { promisify } from "node:util";
 
 const SESSION_ID_PATTERN = /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i;
 const ANSI_PATTERN = /[\u001b\u009b][[\]()#;?]*(?:(?:\d{1,4}(?:;\d{0,4})*)?[0-9A-ORZcf-nqry=><~]|.)/gu;
 const STANDALONE_PING_PATTERN = /^ping(?:[\s.!?。！？]*)$/iu;
 const SESSION_INDEX_FILE_NAME = "session_index.jsonl";
+const STATE_DATABASE_FILE_PATTERN = /^state_(\d+)\.sqlite$/u;
+const SQLITE_MAX_BUFFER_BYTES = 16 * 1024 * 1024;
 const pingSessionCache = new Map();
+const execFile = promisify(execFileCallback);
 
 export const SESSION_LOCATIONS = {
   sessions: "sessions",
@@ -134,7 +139,75 @@ function readThreadName(value) {
   return normalized || null;
 }
 
-async function loadSessionThreadNames(codexDir) {
+function escapeSqliteValue(value) {
+  return `'${String(value ?? "").replaceAll("'", "''")}'`;
+}
+
+async function findStateDatabasePath(codexDir) {
+  let entries;
+
+  try {
+    entries = await readdir(path.resolve(codexDir), { withFileTypes: true });
+  } catch (error) {
+    if (error && error.code === "ENOENT") {
+      return null;
+    }
+
+    throw error;
+  }
+
+  let selectedPath = null;
+  let selectedVersion = -1;
+
+  for (const entry of entries) {
+    if (!entry.isFile()) {
+      continue;
+    }
+
+    const match = entry.name.match(STATE_DATABASE_FILE_PATTERN);
+
+    if (!match) {
+      continue;
+    }
+
+    const version = Number.parseInt(match[1], 10);
+
+    if (!Number.isFinite(version) || version < selectedVersion) {
+      continue;
+    }
+
+    if (version === selectedVersion && selectedPath && entry.name.localeCompare(path.basename(selectedPath)) <= 0) {
+      continue;
+    }
+
+    selectedPath = path.join(path.resolve(codexDir), entry.name);
+    selectedVersion = version;
+  }
+
+  return selectedPath;
+}
+
+async function runSqliteJsonQuery(databasePath, sql) {
+  if (!databasePath) {
+    return null;
+  }
+
+  try {
+    const { stdout } = await execFile("sqlite3", ["-json", databasePath, sql], {
+      maxBuffer: SQLITE_MAX_BUFFER_BYTES
+    });
+    const trimmed = stdout.trim();
+    return trimmed ? JSON.parse(trimmed) : [];
+  } catch (error) {
+    if (error && error.code === "ENOENT") {
+      return null;
+    }
+
+    throw error;
+  }
+}
+
+async function loadSessionIndexThreadNames(codexDir) {
   const indexPath = getSessionIndexPath(codexDir);
   let source;
 
@@ -188,9 +261,14 @@ async function updateSessionThreadName(codexDir, sessionId, threadName) {
   try {
     source = await readFile(indexPath, "utf8");
   } catch (error) {
-    if (!(error && error.code === "ENOENT")) {
-      throw error;
+    if (error && error.code === "ENOENT") {
+      return {
+        found: false,
+        changed: false
+      };
     }
+
+    throw error;
   }
 
   const lines = source
@@ -198,6 +276,7 @@ async function updateSessionThreadName(codexDir, sessionId, threadName) {
     .map((line) => line.trimEnd())
     .filter(Boolean);
   let matched = false;
+  let changed = false;
   const updatedLines = lines.map((line) => {
     let entry;
 
@@ -212,6 +291,13 @@ async function updateSessionThreadName(codexDir, sessionId, threadName) {
     }
 
     matched = true;
+    const currentThreadName = readThreadName(entry.thread_name);
+
+    if (currentThreadName === normalizedThreadName) {
+      return line;
+    }
+
+    changed = true;
     return JSON.stringify({
       ...entry,
       id: sessionId,
@@ -220,18 +306,126 @@ async function updateSessionThreadName(codexDir, sessionId, threadName) {
     });
   });
 
-  if (!matched) {
-    updatedLines.push(
-      JSON.stringify({
-        id: sessionId,
-        thread_name: normalizedThreadName,
-        updated_at: updatedAt
-      })
-    );
+  if (!matched || !changed) {
+    return {
+      found: matched,
+      changed: false
+    };
   }
 
   await mkdir(path.dirname(indexPath), { recursive: true });
   await writeFile(indexPath, `${updatedLines.join("\n")}\n`, "utf8");
+  return {
+    found: true,
+    changed: true
+  };
+}
+
+async function loadStateThreadNames(codexDir) {
+  const databasePath = await findStateDatabasePath(codexDir);
+
+  try {
+    const rows = await runSqliteJsonQuery(
+      databasePath,
+      "SELECT id, title FROM threads WHERE title <> '';"
+    );
+
+    if (!rows) {
+      return new Map();
+    }
+
+    const threadNamesById = new Map();
+
+    for (const row of rows) {
+      if (!row || typeof row !== "object" || typeof row.id !== "string") {
+        continue;
+      }
+
+      const threadName = readThreadName(row.title);
+
+      if (threadName) {
+        threadNamesById.set(row.id, threadName);
+      }
+    }
+
+    return threadNamesById;
+  } catch {
+    return new Map();
+  }
+}
+
+async function loadSessionThreadNames(codexDir) {
+  const [indexThreadNamesById, stateThreadNamesById] = await Promise.all([
+    loadSessionIndexThreadNames(codexDir),
+    loadStateThreadNames(codexDir)
+  ]);
+  const resolvedThreadNamesById = new Map(stateThreadNamesById);
+
+  for (const [id, threadName] of indexThreadNamesById) {
+    resolvedThreadNamesById.set(id, threadName);
+  }
+
+  return {
+    resolvedThreadNamesById,
+    indexThreadNamesById,
+    stateThreadNamesById
+  };
+}
+
+async function readStateThreadTitle(databasePath, sessionId) {
+  const rows = await runSqliteJsonQuery(
+    databasePath,
+    `SELECT title FROM threads WHERE id = ${escapeSqliteValue(sessionId)} LIMIT 1;`
+  );
+
+  if (!rows) {
+    return {
+      available: false,
+      found: false,
+      rawTitle: null,
+      threadName: null
+    };
+  }
+
+  if (!Array.isArray(rows) || rows.length === 0) {
+    return {
+      available: true,
+      found: false,
+      rawTitle: null,
+      threadName: null
+    };
+  }
+
+  const rawTitle = typeof rows[0]?.title === "string" ? rows[0].title : "";
+
+  return {
+    available: true,
+    found: true,
+    rawTitle,
+    threadName: readThreadName(rawTitle)
+  };
+}
+
+async function writeStateThreadTitle(databasePath, sessionId, threadName) {
+  const rows = await runSqliteJsonQuery(
+    databasePath,
+    `UPDATE threads
+SET title = ${escapeSqliteValue(threadName)}
+WHERE id = ${escapeSqliteValue(sessionId)};
+SELECT changes() AS changes;`
+  );
+
+  if (!rows) {
+    return {
+      available: false,
+      changed: false
+    };
+  }
+
+  return {
+    available: true,
+    changed: Number(rows[0]?.changes ?? 0) > 0
+  };
 }
 
 function normalizeLocation(location) {
@@ -511,7 +705,7 @@ async function mutateSessionLocation({
 
 export async function listSessions(options = {}) {
   const roots = getSessionRoots(options);
-  const threadNamesById = await loadSessionThreadNames(roots.codexDir);
+  const { resolvedThreadNamesById } = await loadSessionThreadNames(roots.codexDir);
   const locations = [
     {
       location: SESSION_LOCATIONS.sessions,
@@ -527,7 +721,7 @@ export async function listSessions(options = {}) {
       const files = await collectSessionFiles(rootDir);
       return Promise.all(
         files.map((filePath) =>
-          readSessionRecordIfRetained(filePath, rootDir, location, threadNamesById)
+          readSessionRecordIfRetained(filePath, rootDir, location, resolvedThreadNamesById)
         )
       );
     })
@@ -543,12 +737,12 @@ export async function getSessionRecord({ location, relativePath, ...options }) {
   const roots = getSessionRoots(options);
   const rootDir = getDirectoryForLocation(roots, location);
   const filePath = resolveSessionPath(rootDir, relativePath);
-  const threadNamesById = await loadSessionThreadNames(roots.codexDir);
+  const { resolvedThreadNamesById } = await loadSessionThreadNames(roots.codexDir);
   const record = await readSessionRecordIfRetained(
     filePath,
     rootDir,
     normalizeLocation(location),
-    threadNamesById
+    resolvedThreadNamesById
   );
 
   if (!record) {
@@ -643,12 +837,48 @@ export async function renameSession({ location, relativePath, name, ...options }
     relativePath
   });
   const normalizedThreadName = normalizeThreadName(name);
+  const stateDatabasePath = await findStateDatabasePath(roots.codexDir);
+  const stateThreadTitle = await readStateThreadTitle(stateDatabasePath, sourceRecord.id);
+  const canWriteStateTitle = stateThreadTitle.available && stateThreadTitle.found;
+  let stateTitleChanged = false;
 
-  if (sourceRecord.threadName === normalizedThreadName) {
-    return sourceRecord;
+  if (canWriteStateTitle && stateThreadTitle.threadName !== normalizedThreadName) {
+    const updateResult = await writeStateThreadTitle(
+      stateDatabasePath,
+      sourceRecord.id,
+      normalizedThreadName
+    );
+
+    if (!updateResult.available) {
+      throw new Error("Failed to update the Codex state database.");
+    }
+
+    stateTitleChanged = updateResult.changed;
   }
 
-  await updateSessionThreadName(roots.codexDir, sourceRecord.id, normalizedThreadName);
+  let indexUpdateResult;
+
+  try {
+    indexUpdateResult = await updateSessionThreadName(
+      roots.codexDir,
+      sourceRecord.id,
+      normalizedThreadName
+    );
+  } catch (error) {
+    if (stateTitleChanged) {
+      try {
+        await writeStateThreadTitle(stateDatabasePath, sourceRecord.id, stateThreadTitle.rawTitle ?? "");
+      } catch {
+        // Best effort rollback. If this fails, surfacing the original rename error is still more useful.
+      }
+    }
+
+    throw error;
+  }
+
+  if (!canWriteStateTitle && !indexUpdateResult.found) {
+    throw new Error("Cannot rename this session because no writable title metadata was found.");
+  }
 
   return getSessionRecord({
     ...roots,

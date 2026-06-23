@@ -205,7 +205,7 @@ function truncateText(value, maxLength = 80) {
 }
 
 function getMissingThreadNameLabel() {
-  return "（缺少 thread_name）";
+  return "（缺少标题）";
 }
 
 function getListTitle(item) {

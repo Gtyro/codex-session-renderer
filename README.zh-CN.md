@@ -90,7 +90,7 @@ npm run web
 csr --serve
 ```
 
-Web 页面会同时读取 `sessions` 和 `archived_sessions`，并使用 `~/.codex/session_index.jsonl` 里的 `thread_name` 作为会话标题；你可以直接在侧边栏里原地修改这个标题，也可以归档活动会话、把归档会话恢复回 `sessions`，以及永久删除归档会话。
+Web 页面会同时读取 `sessions` 和 `archived_sessions`，会优先使用 `~/.codex/session_index.jsonl` 里的 `thread_name` 作为会话标题，并在缺失时回退到 Codex 状态数据库里的标题；你可以直接在侧边栏里原地修改标题，也可以归档活动会话、把归档会话恢复回 `sessions`，以及永久删除归档会话。
 双击侧边栏标题即可直接原地编辑，或者使用界面里的 `改名` 操作进入同一套内联编辑状态。
 当你归档或恢复当前选中的会话时，界面会继续停留在当前 scope，并尽量保留原来的浏览上下文，而不是自动跳到另一页。
 
