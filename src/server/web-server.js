@@ -2,8 +2,6 @@ import http from "node:http";
 import { execFile } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import os from "node:os";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import {
   archiveSession,
@@ -22,23 +20,15 @@ import {
   buildSessionListPayload,
   buildSessionPayload
 } from "../core/session-view-model.js";
+import {
+  getRawRequestPathname,
+  getStaticContentType,
+  INDEX_FILE,
+  isBrowserAppRoute,
+  resolveWebAsset
+} from "./static-asset-routing.js";
 
 const execFileAsync = promisify(execFile);
-const WEB_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../web");
-const STATIC_ASSETS = {
-  "/": {
-    filePath: path.join(WEB_ROOT, "index.html"),
-    contentType: "text/html; charset=utf-8"
-  },
-  "/assets/app.js": {
-    filePath: path.join(WEB_ROOT, "app.js"),
-    contentType: "text/javascript; charset=utf-8"
-  },
-  "/assets/styles.css": {
-    filePath: path.join(WEB_ROOT, "styles.css"),
-    contentType: "text/css; charset=utf-8"
-  }
-};
 
 function isWslEnvironment() {
   return (
@@ -236,15 +226,34 @@ async function readJsonBody(request) {
 }
 
 async function serveStaticAsset(response, pathname) {
-  const asset = STATIC_ASSETS[pathname];
+  if (isBrowserAppRoute(pathname)) {
+    const body = await readFile(INDEX_FILE);
+    sendResponse(response, 200, body, getStaticContentType(INDEX_FILE));
+    return true;
+  }
+
+  const asset = resolveWebAsset(pathname);
 
   if (!asset) {
     return false;
   }
 
-  const body = await readFile(asset.filePath);
-  sendResponse(response, 200, body, asset.contentType);
-  return true;
+  if (asset.error) {
+    sendError(response, asset.statusCode, asset.error);
+    return true;
+  }
+
+  try {
+    const body = await readFile(asset.filePath);
+    sendResponse(response, 200, body, asset.contentType);
+    return true;
+  } catch (error) {
+    if (error && (error.code === "ENOENT" || error.code === "EISDIR")) {
+      return false;
+    }
+
+    throw error;
+  }
 }
 
 async function handleApiRequest(request, response, url, roots) {
@@ -377,10 +386,12 @@ export async function startWebServer(options = {}) {
       return;
     }
 
+    const rawPathname = getRawRequestPathname(request.url);
     const url = new URL(request.url, `http://${host}:${port}`);
 
     try {
-      if (await serveStaticAsset(response, url.pathname)) {
+      // Preserve encoded dot-segments so the static asset guard can reject traversal attempts.
+      if (await serveStaticAsset(response, rawPathname)) {
         return;
       }
 

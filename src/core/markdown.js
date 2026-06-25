@@ -1,3 +1,8 @@
+import {
+  collapsePairedSkillMessages,
+  formatMessageTextForPresentation
+} from "../shared/message-presentation.js";
+
 function fence(language, content) {
   const trimmed = String(content ?? "").trimEnd();
   return `~~~${language}\n${trimmed}\n~~~`;
@@ -359,7 +364,7 @@ function entryCallId(entry) {
 
 function renderItemBody(item, mode) {
   if (item.kind === "message") {
-    return item.text;
+    return formatMessageTextForPresentation(item.text, item.role);
   }
 
   if (item.kind === "reasoning") {
@@ -426,7 +431,7 @@ function renderEntryBody(entry, mode) {
 
 export function sessionToMarkdown(session, options = {}) {
   const mode = options.mode || "full";
-  const entries = buildEntries(session.items, mode);
+  const entries = buildEntries(collapsePairedSkillMessages(session.items), mode);
   const selectionLine =
     session.selection?.mode === "recent_rounds"
       ? `- Included rounds: last ${session.selection.roundsIncluded} of ${session.selection.totalRounds ?? session.selection.roundsIncluded}`

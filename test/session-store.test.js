@@ -115,7 +115,7 @@ async function expectMissing(filePath) {
   await assert.rejects(access(filePath));
 }
 
-test("listSessions deletes standalone ping sessions and keeps normal sessions", async () => {
+test("listSessions only deletes ping sessions from the active sessions directory", async () => {
   const tempDir = await mkdtemp(path.join(os.tmpdir(), "csr-session-store-"));
   const sessionsDir = path.join(tempDir, "sessions");
   const archivedSessionsDir = path.join(tempDir, "archived_sessions");
@@ -137,11 +137,19 @@ test("listSessions deletes standalone ping sessions and keeps normal sessions", 
 
     const sessions = await listSessions({ sessionsDir, archivedSessionsDir });
 
-    assert.equal(sessions.length, 1);
-    assert.equal(sessions[0].relativePath, "2026/06/20/regular.jsonl");
+    assert.equal(sessions.length, 2);
+    assert.deepEqual(
+      sessions
+        .map((session) => `${session.location}:${session.relativePath}`)
+        .sort(),
+      [
+        "archived_sessions:2026/06/20/ping-pong.jsonl",
+        "sessions:2026/06/20/regular.jsonl"
+      ]
+    );
     await assert.doesNotReject(readFile(normalFile, "utf8"));
     await expectMissing(pingFile);
-    await expectMissing(pingPongFile);
+    await assert.doesNotReject(readFile(pingPongFile, "utf8"));
   } finally {
     await rm(tempDir, { recursive: true, force: true });
   }
@@ -195,6 +203,32 @@ test("getSessionRecord treats a standalone ping session as deleted", async () =>
       /Session was not found/
     );
     await expectMissing(pingFile);
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("listSessions only inspects the file head when detecting ping sessions", async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "csr-session-store-"));
+  const sessionsDir = path.join(tempDir, "sessions");
+  const archivedSessionsDir = path.join(tempDir, "archived_sessions");
+
+  try {
+    const pingAtHeadFile = await writeSession(sessionsDir, "2026/06/20/ping-head.jsonl", [
+      buildMessage("user", "ping"),
+      buildMessage("assistant", "x".repeat(20_000)),
+      buildMessage("user", "real request after the header window")
+    ]);
+    await writeSession(sessionsDir, "2026/06/20/regular.jsonl", [
+      buildMessage("user", "Render the latest session"),
+      buildMessage("assistant", "Working on it.")
+    ]);
+
+    const sessions = await listSessions({ sessionsDir, archivedSessionsDir });
+
+    assert.equal(sessions.length, 1);
+    assert.equal(sessions[0].relativePath, "2026/06/20/regular.jsonl");
+    await expectMissing(pingAtHeadFile);
   } finally {
     await rm(tempDir, { recursive: true, force: true });
   }

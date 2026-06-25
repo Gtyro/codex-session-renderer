@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { extractSessionId } from "./session-store.js";
+import { countConversationRounds, splitConversationRounds } from "./conversation-rounds.js";
 
 const ANSI_PATTERN = /[\u001b\u009b][[\]()#;?]*(?:(?:\d{1,4}(?:;\d{0,4})*)?[0-9A-ORZcf-nqry=><~]|.)/gu;
 
@@ -28,23 +29,158 @@ function looksLikeContextPrelude(text) {
   );
 }
 
+function imageAttachmentPlaceholder(detail) {
+  return detail ? `[Image attachment: ${detail}]` : "[Image attachment]";
+}
+
+const STANDALONE_TEXT_PROTOCOL_MARKERS = new Set(["<proposed_plan>", "</proposed_plan>"]);
+
+function isStandaloneImageMarker(block, marker) {
+  return block?.kind === "text" && block.text === marker;
+}
+
+function stripStandaloneTextProtocolMarkerLines(text) {
+  const lines = String(text ?? "").split("\n");
+  const hasRenderableContent = lines.some((line) => {
+    const trimmed = line.trim();
+    return trimmed !== "" && !STANDALONE_TEXT_PROTOCOL_MARKERS.has(trimmed);
+  });
+
+  if (!hasRenderableContent) {
+    return String(text ?? "").trim();
+  }
+
+  const filteredLines = lines.filter((line) => !STANDALONE_TEXT_PROTOCOL_MARKERS.has(line.trim()));
+
+  return filteredLines.join("\n").trim();
+}
+
+function stripWrappedImageMarkers(contentBlocks) {
+  return contentBlocks.filter((block, index, blocks) => {
+    if (isStandaloneImageMarker(block, "<image>")) {
+      return blocks[index + 1]?.kind !== "image";
+    }
+
+    if (isStandaloneImageMarker(block, "</image>")) {
+      return blocks[index - 1]?.kind !== "image";
+    }
+
+    return true;
+  });
+}
+
+function isStandaloneTextProtocolMarker(block, marker) {
+  return block?.kind === "text" && block.blockType === "output_text" && block.text === marker;
+}
+
+function stripWrappedTextProtocolMarkers(contentBlocks) {
+  const removableIndexes = new Set();
+  let openIndex = null;
+
+  for (let index = 0; index < contentBlocks.length; index += 1) {
+    const block = contentBlocks[index];
+
+    if (isStandaloneTextProtocolMarker(block, "<proposed_plan>")) {
+      if (openIndex === null) {
+        openIndex = index;
+      }
+      continue;
+    }
+
+    if (isStandaloneTextProtocolMarker(block, "</proposed_plan>")) {
+      if (openIndex !== null) {
+        const hasWrappedContent = contentBlocks
+          .slice(openIndex + 1, index)
+          .some((candidate) => !(candidate.kind === "text" && STANDALONE_TEXT_PROTOCOL_MARKERS.has(candidate.text)));
+
+        if (hasWrappedContent) {
+          removableIndexes.add(openIndex);
+          removableIndexes.add(index);
+        }
+      }
+
+      openIndex = null;
+    }
+  }
+
+  return contentBlocks.filter((_, index) => !removableIndexes.has(index));
+}
+
+function normalizeMessageContentBlock(block) {
+  if (!block || typeof block !== "object") {
+    return null;
+  }
+
+  if ((block.type === "input_text" || block.type === "output_text") && typeof block.text === "string") {
+    const normalizedText = normalizeText(block.text);
+    const text =
+      block.type === "output_text"
+        ? stripStandaloneTextProtocolMarkerLines(normalizedText)
+        : normalizedText;
+
+    return text
+      ? {
+          kind: "text",
+          blockType: block.type,
+          text
+        }
+      : null;
+  }
+
+  if (block.type === "input_image" && typeof block.image_url === "string") {
+    const imageUrl = String(block.image_url).trim();
+    const detail = typeof block.detail === "string" && block.detail.trim() ? block.detail.trim() : null;
+
+    if (!imageUrl) {
+      return null;
+    }
+
+    return {
+      kind: "image",
+      blockType: block.type,
+      imageUrl,
+      detail
+    };
+  }
+
+  const raw = normalizeText(JSON.stringify(block, null, 2));
+
+  return raw
+    ? {
+        kind: "json",
+        blockType: typeof block.type === "string" ? block.type : "unknown",
+        raw
+      }
+    : null;
+}
+
 function parseMessageBlocks(content) {
-  const blocks = Array.isArray(content) ? content : [];
-
-  return blocks
+  const contentBlocks = stripWrappedTextProtocolMarkers(
+    stripWrappedImageMarkers(
+      (Array.isArray(content) ? content : [])
+      .map(normalizeMessageContentBlock)
+      .filter(Boolean)
+    )
+  );
+  const text = contentBlocks
     .map((block) => {
-      if (!block || typeof block !== "object") {
-        return "";
+      if (block.kind === "text") {
+        return block.text;
       }
 
-      if ((block.type === "input_text" || block.type === "output_text") && typeof block.text === "string") {
-        return normalizeText(block.text);
+      if (block.kind === "image") {
+        return imageAttachmentPlaceholder(block.detail);
       }
 
-      return normalizeText(JSON.stringify(block, null, 2));
+      return block.raw;
     })
     .filter(Boolean)
     .join("\n\n");
+
+  return {
+    text,
+    contentBlocks
+  };
 }
 
 function parsePossibleJson(value) {
@@ -178,9 +314,9 @@ export async function loadSession(filePath, options = {}) {
 
     if (payload.type === "message") {
       const role = payload.role || "unknown";
-      const text = parseMessageBlocks(payload.content);
+      const { text, contentBlocks } = parseMessageBlocks(payload.content);
 
-      if (!text) {
+      if (!text && contentBlocks.length === 0) {
         continue;
       }
 
@@ -196,7 +332,9 @@ export async function loadSession(filePath, options = {}) {
         kind: "message",
         timestamp,
         role,
+        phase: payload.phase || null,
         text,
+        contentBlocks,
         isContextPrelude: role === "user" ? looksLikeContextPrelude(text) : false
       });
       continue;
@@ -252,6 +390,9 @@ export async function loadSession(filePath, options = {}) {
 }
 
 export function selectRecentRounds(session, rounds) {
+  const conversationRounds = splitConversationRounds(session.items);
+  const totalRounds = conversationRounds.length;
+
   if (!Number.isFinite(rounds) || rounds <= 0) {
     return {
       ...session,
@@ -262,15 +403,6 @@ export function selectRecentRounds(session, rounds) {
       }
     };
   }
-
-  const userIndexes = session.items
-    .map((item, index) => ({ item, index }))
-    .filter(
-      ({ item }) => item.kind === "message" && item.role === "user" && item.isContextPrelude !== true
-    )
-    .map(({ index }) => index);
-
-  const totalRounds = userIndexes.length;
 
   if (totalRounds === 0 || rounds >= totalRounds) {
     return {
@@ -283,7 +415,8 @@ export function selectRecentRounds(session, rounds) {
     };
   }
 
-  const startIndex = userIndexes[totalRounds - rounds];
+  const selectedRounds = conversationRounds.slice(totalRounds - rounds);
+  const startIndex = selectedRounds[0].startIndex;
 
   return {
     ...session,
@@ -297,21 +430,10 @@ export function selectRecentRounds(session, rounds) {
   };
 }
 
-function countConversationRounds(items) {
-  return items.filter(
-    (item) => item.kind === "message" && item.role === "user" && item.isContextPrelude !== true
-  ).length;
-}
-
 export function splitSessionIntoRounds(session) {
-  const userIndexes = session.items
-    .map((item, index) => ({ item, index }))
-    .filter(
-      ({ item }) => item.kind === "message" && item.role === "user" && item.isContextPrelude !== true
-    )
-    .map(({ index }) => index);
+  const rounds = splitConversationRounds(session.items);
 
-  if (userIndexes.length === 0) {
+  if (rounds.length === 0) {
     return [
       {
         ...session,
@@ -320,23 +442,12 @@ export function splitSessionIntoRounds(session) {
     ];
   }
 
-  const rounds = [];
-  const leadingItems = session.items.slice(0, userIndexes[0]);
-
-  for (let index = 0; index < userIndexes.length; index += 1) {
-    const start = userIndexes[index];
-    const end = userIndexes[index + 1] ?? session.items.length;
-    const items = session.items.slice(start, end);
-
-    rounds.push({
-      ...session,
-      items: index === 0 && leadingItems.length > 0 ? [...leadingItems, ...items] : items,
-      round: {
-        index: index + 1,
-        total: userIndexes.length
-      }
-    });
-  }
-
-  return rounds;
+  return rounds.map((round) => ({
+    ...session,
+    items: session.items.slice(round.startIndex, round.endIndex),
+    round: {
+      index: round.index,
+      total: round.total
+    }
+  }));
 }

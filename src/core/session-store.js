@@ -1,5 +1,5 @@
 import { execFile as execFileCallback } from "node:child_process";
-import { copyFile, mkdir, readFile, readdir, rm, rename, rmdir, stat, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, open, readFile, readdir, rm, rename, rmdir, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -9,6 +9,7 @@ const ANSI_PATTERN = /[\u001b\u009b][[\]()#;?]*(?:(?:\d{1,4}(?:;\d{0,4})*)?[0-9A
 const STANDALONE_PING_PATTERN = /^ping(?:[\s.!?。！？]*)$/iu;
 const SESSION_INDEX_FILE_NAME = "session_index.jsonl";
 const STATE_DATABASE_FILE_PATTERN = /^state_(\d+)\.sqlite$/u;
+const PING_DETECTION_HEADER_BYTES = 16 * 1024;
 const SQLITE_MAX_BUFFER_BYTES = 16 * 1024 * 1024;
 const pingSessionCache = new Map();
 const execFile = promisify(execFileCallback);
@@ -476,6 +477,21 @@ function getDirectoryForLocation(roots, location) {
     : roots.sessionsDir;
 }
 
+async function readUtf8FileHead(filePath, maxBytes) {
+  const handle = await open(filePath, "r");
+  const buffer = Buffer.allocUnsafe(maxBytes);
+
+  try {
+    const { bytesRead } = await handle.read(buffer, 0, maxBytes, 0);
+    return {
+      bytesRead,
+      source: buffer.toString("utf8", 0, bytesRead)
+    };
+  } finally {
+    await handle.close();
+  }
+}
+
 async function isStandalonePingSessionFile(filePath, fileStat) {
   const cached = pingSessionCache.get(filePath);
 
@@ -486,11 +502,15 @@ async function isStandalonePingSessionFile(filePath, fileStat) {
   let isStandalonePing = false;
 
   try {
-    const source = await readFile(filePath, "utf8");
+    const { bytesRead, source } = await readUtf8FileHead(filePath, PING_DETECTION_HEADER_BYTES);
+    const reachedEnd = bytesRead >= fileStat.size;
+    const rawLines = source.split(/\r?\n/u);
+    const lines =
+      !reachedEnd && !source.endsWith("\n") && !source.endsWith("\r") ? rawLines.slice(0, -1) : rawLines;
     let userMessageCount = 0;
     let hasNonPingUserMessage = false;
 
-    for (const rawLine of source.split(/\r?\n/u)) {
+    for (const rawLine of lines) {
       const line = rawLine.trim();
 
       if (!line) {
@@ -595,6 +615,7 @@ async function moveSessionFile(sourcePath, targetPath) {
 }
 
 async function readSessionRecordIfRetained(filePath, rootDir, location, threadNamesById = new Map()) {
+  const normalizedLocation = normalizeLocation(location);
   let fileStat;
 
   try {
@@ -608,7 +629,10 @@ async function readSessionRecordIfRetained(filePath, rootDir, location, threadNa
     throw error;
   }
 
-  if (await isStandalonePingSessionFile(filePath, fileStat)) {
+  if (
+    normalizedLocation === SESSION_LOCATIONS.sessions &&
+    (await isStandalonePingSessionFile(filePath, fileStat))
+  ) {
     await deleteStandalonePingSession(filePath, rootDir);
     return null;
   }
@@ -619,7 +643,7 @@ async function readSessionRecordIfRetained(filePath, rootDir, location, threadNa
     id,
     filePath,
     relativePath: toRelativeSessionPath(rootDir, filePath),
-    location,
+    location: normalizedLocation,
     threadName: threadNamesById.get(id) ?? null,
     modifiedAt: new Date(fileStat.mtimeMs).toISOString(),
     modifiedMs: fileStat.mtimeMs,
@@ -627,9 +651,14 @@ async function readSessionRecordIfRetained(filePath, rootDir, location, threadNa
   };
 }
 
-async function filterRetainedSessionFiles(filePaths, rootDir) {
+async function filterRetainedSessionFiles(filePaths, rootDir, location) {
+  const normalizedLocation = normalizeLocation(location);
   const retained = await Promise.all(
     filePaths.map(async (filePath) => {
+      if (normalizedLocation !== SESSION_LOCATIONS.sessions) {
+        return filePath;
+      }
+
       let fileStat;
 
       try {
@@ -770,7 +799,7 @@ export async function resolveSessionFile({
       requestedLocations.map(async (requestedLocation) => {
         const rootDir = getDirectoryForLocation(roots, requestedLocation);
         const rootFiles = await collectSessionFiles(rootDir);
-        return filterRetainedSessionFiles(rootFiles, rootDir);
+        return filterRetainedSessionFiles(rootFiles, rootDir, requestedLocation);
       })
     )
   )

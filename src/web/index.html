@@ -111,6 +111,16 @@
 
       <section class="chat-pane">
         <header class="chat-header">
+          <div class="chat-actions">
+            <a class="action-link" id="open-preview-link" href="#" target="_blank" rel="noreferrer">HTML</a>
+            <a class="action-link" id="download-compact-link" href="#" target="_blank" rel="noreferrer">Compact</a>
+            <a class="action-link" id="download-full-link" href="#" target="_blank" rel="noreferrer">Full</a>
+            <button class="header-button" id="rename-button" type="button">改名</button>
+            <button class="header-button" id="archive-button" type="button">归档</button>
+            <button class="header-button" id="restore-button" type="button">恢复</button>
+            <button class="header-button danger" id="delete-button" type="button">删除</button>
+          </div>
+
           <div class="chat-header-main">
             <div class="chat-header-row">
               <button class="mobile-back" id="back-to-list" type="button">返回列表</button>
@@ -133,16 +143,6 @@
               </div>
               <p class="feedback" id="feedback-message"></p>
             </div>
-          </div>
-
-          <div class="chat-actions">
-            <a class="action-link" id="open-preview-link" href="#" target="_blank" rel="noreferrer">HTML</a>
-            <a class="action-link" id="download-compact-link" href="#" target="_blank" rel="noreferrer">Compact</a>
-            <a class="action-link" id="download-full-link" href="#" target="_blank" rel="noreferrer">Full</a>
-            <button class="header-button" id="rename-button" type="button">改名</button>
-            <button class="header-button" id="archive-button" type="button">归档</button>
-            <button class="header-button" id="restore-button" type="button">恢复</button>
-            <button class="header-button danger" id="delete-button" type="button">删除</button>
           </div>
         </header>
 
@@ -179,8 +179,9 @@
           <div class="viewer-card">
             <div class="transcript-toolbar" id="transcript-toolbar" hidden>
               <div class="transcript-toolbar-group">
-                <button class="toolbar-button" id="expand-tools-button" type="button">展开 Tools</button>
-                <button class="toolbar-button" id="collapse-tools-button" type="button">收起 Tools</button>
+                <button class="toolbar-button" id="expand-tools-button" type="button">展开过程</button>
+                <button class="toolbar-button" id="collapse-tools-button" type="button">收起过程</button>
+                <p class="transcript-shortcut-hint">消息跳转 <kbd>[</kbd> / <kbd>]</kbd></p>
               </div>
               <p class="transcript-stats" id="transcript-stats">-</p>
             </div>
