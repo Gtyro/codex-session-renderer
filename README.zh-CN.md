@@ -2,97 +2,59 @@
 
 [English README](./README.md)
 
-这个项目会从 `~/.codex/sessions` 和 `~/.codex/archived_sessions` 读取 Codex 会话文件，内置一个可直接使用的 Web 页面用于浏览和管理会话，同时支持通过 CLI 导出 Markdown、HTML，以及按需启用的 PNG 快照。
+这是一个浏览器优先的 Codex 会话浏览器与导出工具。
 
-默认情况下，它只渲染最近一轮对话。这里的一轮指的是：从一条用户消息开始，到下一条用户消息出现之前的全部内容。
+它会从 `~/.codex/sessions` 和 `~/.codex/archived_sessions` 读取会话文件，提供一个内置的浏览器界面用于浏览和管理，同时支持导出 compact/full 两种视图的 Markdown、HTML，以及按需启用的 PNG 快照。VS Code 扩展打开的也是同一套浏览器界面。
+
+## 主要特性
+
+- 用完整浏览器界面浏览活动会话和归档会话。
+- 支持原地修改标题、归档或恢复会话，以及永久删除归档会话。
+- 深链接 URL 会保留 scope、搜索词、选中会话和阅读选项。
+- 会话内容会按对话轮次组织，过程性内容可折叠，并支持用 `[` / `]` 跳转。
+- 结构化图片附件、文件提及摘要和 skill payload 会以更易读的卡片形式展示，而不是原始协议文本。
+- 可以把当前视图导出为 compact/full Markdown、HTML，以及可选的 PNG。
 
 ## 依赖要求
 
 - Node.js 18+
 
-只有在你显式需要导出 PNG 时，才需要安装 Playwright Chromium。Web 页面和 Markdown/HTML 导出不依赖 Chromium。
+如果 Codex 使用的是默认目录，一般不需要额外配置。
 
-渲染器可以使用固定版本的官方 `Source Han Sans SC`（思源黑体简体中文）字体资源来渲染简体中文，因此在字体资源安装完成后，不再依赖系统级中文字体。
-默认情况下，下载的字体文件会保存在每个用户自己的数据目录中，而不是项目包目录内。
-在 Linux 上，这通常是 `~/.local/share/codex-session-renderer/fonts`，除非你设置了 `XDG_DATA_HOME`。
-如果你没有安装字体资源，HTML 预览会退回系统字体，而不会直接报错退出。
-
-## 安装
+## 快速开始
 
 ```bash
 npm install
+npm run web
 ```
 
-可选：安装固定版本字体资源，保证中文显示一致：
+打开 `http://127.0.0.1:4311/`。
+如果 `4311` 已被占用，服务会自动回退到一个空闲随机端口，并在终端打印最终 URL。
 
-```bash
-npm run install:fonts
-```
+默认会读取：
 
-可选：安装 Chromium，用于 PNG 导出：
+- `~/.codex/sessions`
+- `~/.codex/archived_sessions`
 
-```bash
-npm run install:browser
-```
+## Web 页面
 
-## 全局 CLI
-
-可以直接从 GitHub 全局安装 CLI：
-
-```bash
-npm install -g git+https://github.com/Gtyro/codex-session-renderer.git#main
-```
-
-安装完成后，在任意目录都可以使用下面两个命令：
-
-```bash
-codex-session-renderer --latest
-csr --latest
-```
-
-`csr` 是日常使用的短别名。
-
-将固定版本的中文字体资源下载到全局安装对应的用户数据目录：
-
-```bash
-csr --install-fonts
-```
-
-这些字体会下载到你的用户数据目录里，因此即使包本体安装在 root 拥有权限的全局 `node_modules` 下，字体目录依然是可写的。
-
-如果当前机器还没有安装 Playwright Chromium，请执行：
-
-```bash
-npx playwright install chromium
-```
-
-如果后续想删除全局安装：
-
-```bash
-npm uninstall -g codex-session-renderer
-```
-
-如果你是在本地仓库里开发，也仍然可以在仓库根目录执行 `npm link`，让全局命令直接指向当前工作树。
-
-## 用法
-
-启动内置 Web 页面：
+启动内置浏览器界面：
 
 ```bash
 npm run web
 ```
 
-默认会监听在 `http://127.0.0.1:4311/`。
-
-或者使用全局 CLI：
+为活动会话和归档会话分别指定目录：
 
 ```bash
-csr --serve
+npm run web -- --sessions-dir /path/to/sessions --archived-sessions-dir /path/to/archived_sessions
 ```
 
-Web 页面会同时读取 `sessions` 和 `archived_sessions`，会优先使用 `~/.codex/session_index.jsonl` 里的 `thread_name` 作为会话标题，并在缺失时回退到 Codex 状态数据库里的标题；你可以直接在侧边栏里原地修改标题，也可以归档活动会话、把归档会话恢复回 `sessions`，以及永久删除归档会话。
-双击侧边栏标题即可直接原地编辑，或者使用界面里的 `改名` 操作进入同一套内联编辑状态。
-当你归档或恢复当前选中的会话时，界面会继续停留在当前 scope，并尽量保留原来的浏览上下文，而不是自动跳到另一页。
+界面会优先使用 `~/.codex/session_index.jsonl` 里的 `thread_name` 作为会话标题，缺失时再回退到 Codex 状态数据库。你可以双击标题直接原地改名，也可以用顶部操作按钮完成归档、恢复和删除，并通过深链接 URL 重新打开同一个浏览视图。
+
+## CLI 导出
+
+浏览器界面是主入口。CLI 主要用于导出快照和分享产物。
 
 渲染最新会话：
 
@@ -100,24 +62,13 @@ Web 页面会同时读取 `sessions` 和 `archived_sessions`，会优先使用 `
 npm run render -- --latest
 ```
 
-为本地仓库安装固定版本的中文字体资源：
-
-```bash
-npm run install:fonts
-```
-
-CLI 也可以直接安装字体：
-
-```bash
-csr --install-fonts
-codex-session-renderer --install-fonts
-```
-
-渲染最近 3 轮对话，而不只是最近 1 轮：
+渲染最近 3 轮：
 
 ```bash
 npm run render -- --latest --rounds 3
 ```
+
+如果需要查看默认最近一轮之外的内容，可以使用 `--rounds` 或 `--all`。
 
 按会话 ID 渲染：
 
@@ -137,79 +88,118 @@ npm run render -- --id 019cea6d-7660-7c51-ade7-510d2bdf3caa --all
 npm run render -- --id 019cea6d-7660-7c51-ade7-510d2bdf3caa --sessions-dir /path/to/sessions --output-dir ./artifacts
 ```
 
-为 Web 页面分别指定活动会话目录和归档目录：
-
-```bash
-npm run web -- --sessions-dir /path/to/sessions --archived-sessions-dir /path/to/archived_sessions
-```
-
 渲染前先清空输出目录：
 
 ```bash
 npm run render -- --latest --clean-output
 ```
 
-输出 Markdown/HTML，并额外生成最终 PNG 图片：
+额外生成 PNG 图片：
 
 ```bash
 npm run render -- --latest --png
 ```
 
-只输出最终 PNG 图片：
+只保留最终 PNG 图片：
 
 ```bash
 npm run render -- --latest --png-only
 ```
 
-包含默认隐藏的脚手架信息：
+包含默认隐藏的 context、developer 消息和 reasoning 摘要：
 
 ```bash
 npm run render -- --latest --include-context --include-developer --include-reasoning
 ```
 
-同样的参数也适用于全局命令：
+`--no-images` 仍然保留为兼容旧用法的参数，但现在默认本来就不会导出 PNG。
+
+## 可选全局 CLI
+
+可以直接从 GitHub 全局安装 CLI：
 
 ```bash
-csr --latest --rounds 3
-csr --id 019cea6d-7660-7c51-ade7-510d2bdf3caa --all
+npm install -g git+https://github.com/Gtyro/codex-session-renderer.git#main
+```
+
+安装完成后，在任意目录都可以使用这两个命令名：
+
+```bash
 csr --serve
+csr --latest --rounds 3
+codex-session-renderer --id 019cea6d-7660-7c51-ade7-510d2bdf3caa --all
 ```
 
-跳过 PNG，只保留 Markdown/HTML 输出：
-
-```bash
-npm run render -- --latest --no-images
-```
-
-`--no-images` 现在只是兼容旧用法，因为默认就不会导出 PNG。
-
-如果 Playwright Chromium 缺失，PNG 渲染会提示你执行 `npm run install:browser`。但 Web 页面和默认的 Markdown/HTML 路径仍然可以正常使用。
+`csr` 是日常使用的短别名。
 
 ## VS Code 扩展
 
-这个仓库现在也可以直接打包为 VS Code 扩展。扩展的定位是“浏览器优先”：
+这个仓库也可以直接打包成 VS Code 扩展。扩展会启动本地会话浏览服务，并在外部浏览器里打开完整界面，而不是把主体验强行塞进侧栏。
 
-- 入口在 VS Code 命令面板
-- 主要浏览界面在外部浏览器全屏打开
-- 不强行把主体验塞进侧栏
-
-第一版扩展提供这些命令：
+扩展提供这些命令：
 
 - `Codex Session Renderer: Open Session Browser`
 - `Codex Session Renderer: Open Latest Preview`
 - `Codex Session Renderer: Copy Browser URL`
-- `Codex Session Renderer: Stop Session Browser`
+- `Codex Session Renderer: Run Developer Self-Check`（仅在启用 `codexSessionRenderer.showDeveloperCommands` 时显示）
 
-扩展 manifest 直接复用仓库根目录的 `package.json`，扩展入口文件是 `vscode/extension.cjs`。Marketplace 展示页使用单独的 `vscode/README.md` 和 `vscode/CHANGELOG.md`，不会直接拿项目根目录文档当扩展说明。
+扩展 manifest 直接复用仓库根目录的 `package.json`，扩展入口文件是 `vscode/extension.cjs`，Marketplace 文档使用单独的 `vscode/README.md` 和 `vscode/CHANGELOG.md`。
+扩展打开的浏览器视图保留与独立 Web 页面一致的深链接 URL 状态、对话轮次组织方式和 transcript 跳转能力。
+扩展启动的浏览器服务会在最后一个浏览器窗口或标签页关闭后自动停止。
 在 Remote SSH、WSL 或其他远端扩展宿主下，扩展会先让 VS Code 把本地服务地址转换成客户端可访问的外部 URL，再用于打开浏览器或复制链接。
 
-如果你已经跑通过 Marketplace 流程，打包 VSIX 的最小步骤就是：
+从仓库根目录打包 `.vsix`：
 
 ```bash
 npm run package:vsix
 ```
 
-打出来的 `.vsix` 就可以上传到 Marketplace 网页端。
+## 可选资源
+
+如果需要一致的简体中文渲染效果，可以安装固定版本的字体资源：
+
+```bash
+npm run install:fonts
+```
+
+CLI 也可以直接安装同一套字体资源：
+
+```bash
+csr --install-fonts
+codex-session-renderer --install-fonts
+```
+
+渲染器使用固定版本的官方 `Source Han Sans SC`（思源黑体简体中文）字体下载。字体文件会保存在每个用户自己的数据目录中，而不是项目包目录内。在 Linux 上，这通常是 `~/.local/share/codex-session-renderer/fonts`，除非设置了 `XDG_DATA_HOME`。如果没有安装这些字体资源，HTML 预览会回退到系统字体，而不会直接失败。
+
+只有在需要 PNG 导出时，才需要安装 Playwright Chromium：
+
+```bash
+npm run install:browser
+```
+
+浏览器界面和默认的 Markdown/HTML 导出都不依赖 Chromium。如果 Chromium 缺失，PNG 导出会给出 `npm run install:browser` 提示，而不会影响浏览器界面。
+
+## 输出内容
+
+默认的 Markdown/HTML 模式下，每次运行都会在输出目录中写入以下文件：
+
+- `<session-id>.md`：完整归档转录
+- `<session-id>.compact.md`：适合分享的精简转录
+- `<session-id>.compact.html`：当前选中转录的完整 HTML
+- `<session-id>.round-01.compact.html`、`<session-id>.round-02.compact.html` 等：按轮次拆分、用于图片渲染的 HTML
+
+启用 `--png` 或 `--png-only` 时，渲染器还会额外写入：
+
+- `<session-id>.round-01.compact.png`、`<session-id>.round-02.compact.png` 等：通常每轮输出一张图片
+- 如果单轮内容仍然过高，会自动回退为分页图片，例如 `<session-id>.round-01.compact-01.png`
+
+启用 `--png-only` 时，渲染器不会保留顶层 Markdown/HTML 产物，并会在导出 PNG 后删除临时的分轮 HTML，最终只保留 PNG 文件。
+
+默认情况下，渲染器只保留最近一轮对话中的用户消息、助手消息、工具调用和工具输出。开发者提示、内部推理以及注入的上下文内容默认隐藏，只有显式启用相关参数时才会包含。
+
+结构化图片附件、文件提及摘要和 skill payload 会在 Markdown 与交互式 HTML 中统一整理为更易读的展示形式。
+
+精简输出会隐藏空轮询调用、折叠进度日志较多的内容，并截断过长的工具输出片段，以便最终 PNG 更易阅读。
 
 ## Shell 补全
 
@@ -230,26 +220,3 @@ echo 'source (csr --print-completion fish | psub)' >> ~/.config/fish/config.fish
 ```
 
 生成的脚本会同时为 `csr` 和 `codex-session-renderer` 注册补全。
-
-## 输出内容
-
-每次运行都会在输出目录中写入以下文件：
-
-- `<session-id>.md`：完整归档转录
-- `<session-id>.compact.md`：适合分享的精简转录
-- `<session-id>.compact.html`：当前选中转录的完整 HTML
-- `<session-id>.round-01.compact.html`、`<session-id>.round-02.compact.html` 等：按轮次拆分、用于图片渲染的 HTML
-- `<session-id>.round-01.compact.png`、`<session-id>.round-02.compact.png` 等：默认每轮输出一张图片
-- 如果单轮内容仍然过高，会自动回退为分页图片，例如 `<session-id>.round-01.compact-01.png`
-
-启用 `--png-only` 时，渲染器会删除当前会话对应的 Markdown 和 HTML 中间产物，只保留最终 PNG 文件。
-
-默认情况下，渲染器不会生成 PNG，因此不需要 Playwright Chromium。
-
-启用 `--png` 时，渲染器会在保留 Markdown/HTML 的同时额外生成 PNG。
-
-启用 `--clean-output` 时，渲染器会在写入新文件前先清空目标输出目录。
-
-默认情况下，渲染器只保留最近一轮对话中的用户消息、助手消息、工具调用和工具输出。开发者提示、内部推理以及注入的上下文内容默认隐藏，只有显式启用相关参数时才会包含。
-
-精简输出会隐藏空轮询调用、折叠进度日志较多的内容，并截断过长的工具输出片段，以便最终 PNG 更易阅读。

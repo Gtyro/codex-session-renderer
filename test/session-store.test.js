@@ -5,10 +5,12 @@ import os from "node:os";
 import path from "node:path";
 import { access, mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import {
+  archiveSession,
   getSessionRecord,
   listSessions,
   renameSession,
   resolveSessionFile,
+  restoreSession,
   SESSION_LOCATIONS
 } from "../src/core/session-store.js";
 
@@ -69,10 +71,51 @@ async function writeStateDatabase(codexDir, entries) {
 
   await mkdir(codexDir, { recursive: true });
   const databasePath = path.join(codexDir, "state_5.sqlite");
-  const escapedEntries = entries.map(({ id, title }) => {
-    const escapedId = String(id).replaceAll("'", "''");
-    const escapedTitle = String(title).replaceAll("'", "''");
-    return `INSERT INTO threads (id, title) VALUES ('${escapedId}', '${escapedTitle}');`;
+  const escapedEntries = entries.map((entry) => {
+    const values = {
+      id: entry.id,
+      rollout_path: entry.rollout_path ?? "",
+      created_at: entry.created_at ?? 0,
+      updated_at: entry.updated_at ?? 0,
+      source: entry.source ?? "",
+      model_provider: entry.model_provider ?? "",
+      cwd: entry.cwd ?? "",
+      title: entry.title ?? "",
+      sandbox_policy: entry.sandbox_policy ?? "",
+      approval_mode: entry.approval_mode ?? "",
+      cli_version: entry.cli_version ?? "",
+      first_user_message: entry.first_user_message ?? "",
+      tokens_used: entry.tokens_used ?? 0,
+      has_user_event: entry.has_user_event ?? 0,
+      archived: entry.archived ?? 0,
+      archived_at: entry.archived_at ?? null,
+      preview: entry.preview ?? "",
+      recency_at: entry.recency_at ?? 0,
+      thread_source: entry.thread_source ?? null,
+      memory_mode: entry.memory_mode ?? "enabled",
+      model: entry.model ?? null,
+      reasoning_effort: entry.reasoning_effort ?? null,
+      history_mode: entry.history_mode ?? "legacy",
+      created_at_ms: entry.created_at_ms ?? null,
+      updated_at_ms: entry.updated_at_ms ?? null,
+      recency_at_ms: entry.recency_at_ms ?? null
+    };
+    const columns = Object.keys(values);
+    const sqlValues = columns.map((column) => {
+      const value = values[column];
+
+      if (value === null) {
+        return "NULL";
+      }
+
+      if (typeof value === "number") {
+        return String(value);
+      }
+
+      return `'${String(value).replaceAll("'", "''")}'`;
+    });
+
+    return `INSERT INTO threads (${columns.join(", ")}) VALUES (${sqlValues.join(", ")});`;
   });
 
   execFileSync(
@@ -81,7 +124,34 @@ async function writeStateDatabase(codexDir, entries) {
       databasePath,
       [
         "PRAGMA journal_mode=WAL;",
-        "CREATE TABLE threads (id TEXT PRIMARY KEY, title TEXT NOT NULL DEFAULT '');",
+        `CREATE TABLE threads (
+          id TEXT PRIMARY KEY,
+          rollout_path TEXT NOT NULL DEFAULT '',
+          created_at INTEGER NOT NULL DEFAULT 0,
+          updated_at INTEGER NOT NULL DEFAULT 0,
+          source TEXT NOT NULL DEFAULT '',
+          model_provider TEXT NOT NULL DEFAULT '',
+          cwd TEXT NOT NULL DEFAULT '',
+          title TEXT NOT NULL DEFAULT '',
+          sandbox_policy TEXT NOT NULL DEFAULT '',
+          approval_mode TEXT NOT NULL DEFAULT '',
+          cli_version TEXT NOT NULL DEFAULT '',
+          first_user_message TEXT NOT NULL DEFAULT '',
+          tokens_used INTEGER NOT NULL DEFAULT 0,
+          has_user_event INTEGER NOT NULL DEFAULT 0,
+          archived INTEGER NOT NULL DEFAULT 0,
+          archived_at INTEGER,
+          preview TEXT NOT NULL DEFAULT '',
+          recency_at INTEGER NOT NULL DEFAULT 0,
+          thread_source TEXT,
+          memory_mode TEXT NOT NULL DEFAULT 'enabled',
+          model TEXT,
+          reasoning_effort TEXT,
+          history_mode TEXT NOT NULL DEFAULT 'legacy',
+          created_at_ms INTEGER,
+          updated_at_ms INTEGER,
+          recency_at_ms INTEGER
+        );`,
         ...escapedEntries
       ].join("\n")
     ],
@@ -109,6 +179,65 @@ function readStateTitle(codexDir, sessionId) {
   ).trim();
   const rows = raw ? JSON.parse(raw) : [];
   return rows[0]?.title ?? null;
+}
+
+function readStateThread(codexDir, sessionId) {
+  if (!SQLITE_CLI_AVAILABLE) {
+    throw new Error("sqlite3 CLI is required for this test.");
+  }
+
+  const databasePath = path.join(codexDir, "state_5.sqlite");
+  const escapedId = String(sessionId).replaceAll("'", "''");
+  const availableColumnsRaw = execFileSync(
+    "sqlite3",
+    ["-json", databasePath, "PRAGMA table_info(threads);"],
+    {
+      encoding: "utf8"
+    }
+  ).trim();
+  const availableColumns = new Set(
+    (availableColumnsRaw ? JSON.parse(availableColumnsRaw) : [])
+      .map((column) => column?.name)
+      .filter(Boolean)
+  );
+  const requestedColumns = [
+    "id",
+    "rollout_path",
+    "archived",
+    "archived_at",
+    "updated_at",
+    "updated_at_ms",
+    "title",
+    "preview",
+    "first_user_message",
+    "source",
+    "model_provider",
+    "cwd",
+    "approval_mode",
+    "sandbox_policy",
+    "cli_version",
+    "thread_source",
+    "model",
+    "reasoning_effort",
+    "recency_at",
+    "recency_at_ms"
+  ].filter((columnName) => availableColumns.has(columnName));
+  const raw = execFileSync(
+    "sqlite3",
+    [
+      "-json",
+      databasePath,
+      `SELECT ${requestedColumns.join(", ")}
+FROM threads
+WHERE id = '${escapedId}'
+LIMIT 1;`
+    ],
+    {
+      encoding: "utf8"
+    }
+  ).trim();
+  const rows = raw ? JSON.parse(raw) : [];
+  return rows[0] ?? null;
 }
 
 async function expectMissing(filePath) {
@@ -442,6 +571,226 @@ test("renameSession updates SQLite without creating a new session_index record",
       "Remote SSH regression"
     );
     await assert.rejects(access(path.join(codexDir, "session_index.jsonl")));
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("archiveSession moves the file and updates the SQLite thread location", async (t) => {
+  if (!SQLITE_CLI_AVAILABLE) {
+    t.skip("sqlite3 CLI is not available");
+  }
+
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "csr-session-store-"));
+  const codexDir = path.join(tempDir, ".codex");
+  const sessionsDir = path.join(tempDir, "sessions");
+  const archivedSessionsDir = path.join(tempDir, "archived_sessions");
+  const relativePath =
+    "2026/06/20/rollout-2026-06-20T11-00-00-01900000-0000-7000-8000-000000000002.jsonl";
+  const sessionId = "01900000-0000-7000-8000-000000000002";
+
+  try {
+    const sourcePath = await writeSession(sessionsDir, relativePath, [
+      buildMessage("user", "hello"),
+      buildMessage("assistant", "world")
+    ]);
+    const archivedPath = path.join(archivedSessionsDir, relativePath);
+    await writeStateDatabase(codexDir, [
+      {
+        id: sessionId,
+        title: "Archive me",
+        rollout_path: sourcePath,
+        archived: 0,
+        updated_at: 10,
+        updated_at_ms: 10_000
+      }
+    ]);
+
+    const archived = await archiveSession({
+      codexDir,
+      sessionsDir,
+      archivedSessionsDir,
+      location: SESSION_LOCATIONS.sessions,
+      relativePath
+    });
+
+    assert.equal(archived.location, SESSION_LOCATIONS.archived);
+    assert.equal(archived.relativePath, relativePath);
+    await expectMissing(sourcePath);
+    await assert.doesNotReject(readFile(archivedPath, "utf8"));
+
+    const stateThread = readStateThread(codexDir, sessionId);
+    assert.equal(stateThread?.rollout_path, archivedPath);
+    assert.equal(stateThread?.archived, 1);
+    assert.equal(typeof stateThread?.archived_at, "number");
+    assert.equal(typeof stateThread?.updated_at, "number");
+    assert.equal(typeof stateThread?.updated_at_ms, "number");
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("restoreSession moves the file back and clears the SQLite archived state", async (t) => {
+  if (!SQLITE_CLI_AVAILABLE) {
+    t.skip("sqlite3 CLI is not available");
+  }
+
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "csr-session-store-"));
+  const codexDir = path.join(tempDir, ".codex");
+  const sessionsDir = path.join(tempDir, "sessions");
+  const archivedSessionsDir = path.join(tempDir, "archived_sessions");
+  const relativePath =
+    "2026/06/20/rollout-2026-06-20T11-00-00-01900000-0000-7000-8000-000000000002.jsonl";
+  const sessionId = "01900000-0000-7000-8000-000000000002";
+
+  try {
+    const archivedPath = await writeSession(archivedSessionsDir, relativePath, [
+      buildMessage("user", "hello"),
+      buildMessage("assistant", "world")
+    ]);
+    const restoredPath = path.join(sessionsDir, relativePath);
+    await writeStateDatabase(codexDir, [
+      {
+        id: sessionId,
+        title: "Restore me",
+        rollout_path: archivedPath,
+        archived: 1,
+        archived_at: 123,
+        updated_at: 12,
+        updated_at_ms: 12_000
+      }
+    ]);
+
+    const restored = await restoreSession({
+      codexDir,
+      sessionsDir,
+      archivedSessionsDir,
+      location: SESSION_LOCATIONS.archived,
+      relativePath
+    });
+
+    assert.equal(restored.location, SESSION_LOCATIONS.sessions);
+    assert.equal(restored.relativePath, relativePath);
+    await expectMissing(archivedPath);
+    await assert.doesNotReject(readFile(restoredPath, "utf8"));
+
+    const stateThread = readStateThread(codexDir, sessionId);
+    assert.equal(stateThread?.rollout_path, restoredPath);
+    assert.equal(stateThread?.archived, 0);
+    assert.equal(stateThread?.archived_at, null);
+    assert.equal(typeof stateThread?.updated_at, "number");
+    assert.equal(typeof stateThread?.updated_at_ms, "number");
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("restoreSession canonicalizes a flat archived rollout path before reactivating it", async (t) => {
+  if (!SQLITE_CLI_AVAILABLE) {
+    t.skip("sqlite3 CLI is not available");
+  }
+
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "csr-session-store-"));
+  const codexDir = path.join(tempDir, ".codex");
+  const sessionsDir = path.join(tempDir, "sessions");
+  const archivedSessionsDir = path.join(tempDir, "archived_sessions");
+  const relativePath = "rollout-2026-07-01T16-24-13-019f1cc7-5727-7cc1-bcbc-ae5a26c8e8c5.jsonl";
+  const canonicalRelativePath =
+    "2026/07/01/rollout-2026-07-01T16-24-13-019f1cc7-5727-7cc1-bcbc-ae5a26c8e8c5.jsonl";
+  const sessionId = "019f1cc7-5727-7cc1-bcbc-ae5a26c8e8c5";
+
+  try {
+    const archivedPath = await writeSession(archivedSessionsDir, relativePath, [
+      buildMessage("user", "hello"),
+      buildMessage("assistant", "world")
+    ]);
+    const restoredPath = path.join(sessionsDir, canonicalRelativePath);
+    await writeStateDatabase(codexDir, [
+      {
+        id: sessionId,
+        title: "Restore me",
+        rollout_path: archivedPath,
+        archived: 1,
+        archived_at: 123,
+        updated_at: 12,
+        updated_at_ms: 12_000
+      }
+    ]);
+
+    const restored = await restoreSession({
+      codexDir,
+      sessionsDir,
+      archivedSessionsDir,
+      location: SESSION_LOCATIONS.archived,
+      relativePath
+    });
+
+    assert.equal(restored.location, SESSION_LOCATIONS.sessions);
+    assert.equal(restored.relativePath, canonicalRelativePath);
+    await expectMissing(archivedPath);
+    await assert.doesNotReject(readFile(restoredPath, "utf8"));
+
+    const stateThread = readStateThread(codexDir, sessionId);
+    assert.equal(stateThread?.rollout_path, restoredPath);
+    assert.equal(stateThread?.archived, 0);
+    assert.equal(stateThread?.archived_at, null);
+    assert.equal(typeof stateThread?.updated_at, "number");
+    assert.equal(typeof stateThread?.updated_at_ms, "number");
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("archiveSession canonicalizes a flat active rollout path before archiving it", async (t) => {
+  if (!SQLITE_CLI_AVAILABLE) {
+    t.skip("sqlite3 CLI is not available");
+  }
+
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "csr-session-store-"));
+  const codexDir = path.join(tempDir, ".codex");
+  const sessionsDir = path.join(tempDir, "sessions");
+  const archivedSessionsDir = path.join(tempDir, "archived_sessions");
+  const relativePath = "rollout-2026-07-01T16-24-13-019f1cc7-5727-7cc1-bcbc-ae5a26c8e8c5.jsonl";
+  const canonicalRelativePath =
+    "2026/07/01/rollout-2026-07-01T16-24-13-019f1cc7-5727-7cc1-bcbc-ae5a26c8e8c5.jsonl";
+  const sessionId = "019f1cc7-5727-7cc1-bcbc-ae5a26c8e8c5";
+
+  try {
+    const sourcePath = await writeSession(sessionsDir, relativePath, [
+      buildMessage("user", "hello"),
+      buildMessage("assistant", "world")
+    ]);
+    const archivedPath = path.join(archivedSessionsDir, canonicalRelativePath);
+    await writeStateDatabase(codexDir, [
+      {
+        id: sessionId,
+        title: "Archive me",
+        rollout_path: sourcePath,
+        archived: 0,
+        updated_at: 10,
+        updated_at_ms: 10_000
+      }
+    ]);
+
+    const archived = await archiveSession({
+      codexDir,
+      sessionsDir,
+      archivedSessionsDir,
+      location: SESSION_LOCATIONS.sessions,
+      relativePath
+    });
+
+    assert.equal(archived.location, SESSION_LOCATIONS.archived);
+    assert.equal(archived.relativePath, canonicalRelativePath);
+    await expectMissing(sourcePath);
+    await assert.doesNotReject(readFile(archivedPath, "utf8"));
+
+    const stateThread = readStateThread(codexDir, sessionId);
+    assert.equal(stateThread?.rollout_path, archivedPath);
+    assert.equal(stateThread?.archived, 1);
+    assert.equal(typeof stateThread?.archived_at, "number");
+    assert.equal(typeof stateThread?.updated_at, "number");
+    assert.equal(typeof stateThread?.updated_at_ms, "number");
   } finally {
     await rm(tempDir, { recursive: true, force: true });
   }

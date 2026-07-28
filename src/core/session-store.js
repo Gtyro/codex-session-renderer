@@ -429,6 +429,131 @@ SELECT changes() AS changes;`
   };
 }
 
+async function loadStateThreadColumns(databasePath) {
+  const rows = await runSqliteJsonQuery(databasePath, "PRAGMA table_info(threads);");
+
+  if (!rows) {
+    return null;
+  }
+
+  const columns = new Set();
+
+  for (const row of rows) {
+    if (row && typeof row.name === "string" && row.name) {
+      columns.add(row.name);
+    }
+  }
+
+  return columns;
+}
+
+async function readStateThreadRecord(databasePath, sessionId) {
+  const rows = await runSqliteJsonQuery(
+    databasePath,
+    `SELECT id FROM threads WHERE id = ${escapeSqliteValue(sessionId)} LIMIT 1;`
+  );
+
+  if (!rows) {
+    return {
+      available: false,
+      found: false
+    };
+  }
+
+  return {
+    available: true,
+    found: Array.isArray(rows) && rows.length > 0
+  };
+}
+
+async function writeStateThreadLocation(databasePath, sessionId, locationUpdate, columns = null) {
+  const availableColumns = columns ?? (await loadStateThreadColumns(databasePath));
+
+  if (!availableColumns) {
+    return {
+      available: false,
+      found: false,
+      changed: false
+    };
+  }
+
+  const record = await readStateThreadRecord(databasePath, sessionId);
+
+  if (!record.available) {
+    return {
+      available: false,
+      found: false,
+      changed: false
+    };
+  }
+
+  if (!record.found) {
+    return {
+      available: true,
+      found: false,
+      changed: false
+    };
+  }
+
+  const updatedAtMs = Number(locationUpdate.updatedAtMs);
+  const updatedAtSeconds = Math.floor(updatedAtMs / 1000);
+  const assignments = [];
+
+  if (availableColumns.has("rollout_path")) {
+    assignments.push(`rollout_path = ${escapeSqliteValue(locationUpdate.rolloutPath)}`);
+  }
+
+  if (availableColumns.has("archived")) {
+    assignments.push(`archived = ${locationUpdate.archived ? 1 : 0}`);
+  }
+
+  if (availableColumns.has("archived_at")) {
+    assignments.push(
+      locationUpdate.archived
+        ? `archived_at = ${updatedAtSeconds}`
+        : "archived_at = NULL"
+    );
+  }
+
+  if (availableColumns.has("updated_at")) {
+    assignments.push(`updated_at = ${updatedAtSeconds}`);
+  }
+
+  if (availableColumns.has("updated_at_ms")) {
+    assignments.push(`updated_at_ms = ${updatedAtMs}`);
+  }
+
+  if (assignments.length === 0) {
+    return {
+      available: true,
+      found: true,
+      changed: false
+    };
+  }
+
+  const rows = await runSqliteJsonQuery(
+    databasePath,
+    `UPDATE threads
+SET ${assignments.join(",\n    ")}
+WHERE id = ${escapeSqliteValue(sessionId)};
+SELECT changes() AS changes;`
+  );
+
+  if (!rows) {
+    return {
+      available: false,
+      found: false,
+      changed: false
+    };
+  }
+
+  return {
+    available: true,
+    found: true,
+    changed: Number(rows[0]?.changes ?? 0) > 0
+  };
+}
+
 function normalizeLocation(location) {
   if (location === SESSION_LOCATIONS.sessions || location === "active") {
     return SESSION_LOCATIONS.sessions;
@@ -451,6 +576,23 @@ function normalizeRelativeSessionPath(relativePath) {
   }
 
   return normalized;
+}
+
+function canonicalizeTargetRelativeSessionPath(relativePath) {
+  const normalizedRelativePath = normalizeRelativeSessionPath(relativePath);
+
+  if (normalizedRelativePath.includes("/")) {
+    return normalizedRelativePath;
+  }
+
+  const match = /^rollout-(\d{4})-(\d{2})-(\d{2})T.+\.jsonl$/u.exec(normalizedRelativePath);
+
+  if (!match) {
+    return normalizedRelativePath;
+  }
+
+  const [, year, month, day] = match;
+  return `${year}/${month}/${day}/${normalizedRelativePath}`;
 }
 
 function toRelativeSessionPath(rootDir, filePath) {
@@ -695,9 +837,13 @@ async function mutateSessionLocation({
   const roots = getSessionRoots({ sessionsDir, archivedSessionsDir, codexDir });
   const sourceRoot = getDirectoryForLocation(roots, fromLocation);
   const targetRoot = getDirectoryForLocation(roots, toLocation);
-  const normalizedRelativePath = normalizeRelativeSessionPath(relativePath);
-  const sourcePath = resolveSessionPath(sourceRoot, normalizedRelativePath);
-  const targetPath = resolveSessionPath(targetRoot, normalizedRelativePath);
+  const sourceRelativePath = normalizeRelativeSessionPath(relativePath);
+  const targetRelativePath = canonicalizeTargetRelativeSessionPath(sourceRelativePath);
+  const sourcePath = resolveSessionPath(sourceRoot, sourceRelativePath);
+  const targetPath = resolveSessionPath(targetRoot, targetRelativePath);
+  const sessionId = sessionIdFromPath(sourcePath);
+  const stateDatabasePath = await findStateDatabasePath(roots.codexDir);
+  const stateThreadColumns = await loadStateThreadColumns(stateDatabasePath);
 
   await mkdir(path.dirname(targetPath), { recursive: true });
 
@@ -705,7 +851,7 @@ async function mutateSessionLocation({
     await stat(sourcePath);
   } catch (error) {
     if (error && error.code === "ENOENT") {
-      throw new Error(`Session was not found: ${normalizedRelativePath}`);
+      throw new Error(`Session was not found: ${sourceRelativePath}`);
     }
 
     throw error;
@@ -714,7 +860,7 @@ async function mutateSessionLocation({
   try {
     await stat(targetPath);
     throw new Error(
-      `Cannot move session because the destination already exists: ${normalizedRelativePath}`
+      `Cannot move session because the destination already exists: ${targetRelativePath}`
     );
   } catch (error) {
     if (!(error && error.code === "ENOENT")) {
@@ -723,12 +869,35 @@ async function mutateSessionLocation({
   }
 
   await moveSessionFile(sourcePath, targetPath);
+
+  try {
+    await writeStateThreadLocation(
+      stateDatabasePath,
+      sessionId,
+      {
+        archived: normalizeLocation(toLocation) === SESSION_LOCATIONS.archived,
+        rolloutPath: targetPath,
+        updatedAtMs: Date.now()
+      },
+      stateThreadColumns
+    );
+  } catch (error) {
+    try {
+      await moveSessionFile(targetPath, sourcePath);
+      await removeEmptyParents(path.dirname(targetPath), targetRoot);
+    } catch {
+      // Best effort rollback. Prefer surfacing the original DB sync failure.
+    }
+
+    throw error;
+  }
+
   await removeEmptyParents(path.dirname(sourcePath), sourceRoot);
 
   return getSessionRecord({
     ...roots,
     location: normalizeLocation(toLocation),
-    relativePath: normalizedRelativePath
+    relativePath: targetRelativePath
   });
 }
 

@@ -1,7 +1,11 @@
+const { mkdir, readFile, rm, writeFile } = require("node:fs/promises");
 const path = require("node:path");
 const { pathToFileURL } = require("node:url");
 
-let serverHandlePromise = null;
+const REGISTRY_BASENAME = "shared-server";
+const SERVER_PROBE_TIMEOUT_MS = 1_500;
+
+let serverStatePromise = null;
 
 function getProjectRoot(context) {
   return context.extensionPath || path.resolve(__dirname, "..");
@@ -32,10 +36,103 @@ function getConfiguredServer(vscode) {
   const config = vscode.workspace.getConfiguration("codexSessionRenderer");
   const host = config.get("host") || "127.0.0.1";
   const configuredPort = Number(config.get("port"));
+  const inspectedPort = config.inspect("port");
+  const hasExplicitPort =
+    inspectedPort?.globalValue !== undefined ||
+    inspectedPort?.workspaceValue !== undefined ||
+    inspectedPort?.workspaceFolderValue !== undefined;
 
   return {
     host,
-    port: Number.isFinite(configuredPort) ? configuredPort : 4311
+    port: hasExplicitPort && Number.isFinite(configuredPort) ? configuredPort : undefined
+  };
+}
+
+function getSharedStorageDir(context) {
+  return context?.globalStorageUri?.fsPath || null;
+}
+
+function getRegistryPaths(storageDir) {
+  return {
+    registryFile: path.join(storageDir, `${REGISTRY_BASENAME}.json`)
+  };
+}
+
+async function readRegistry(registryFile) {
+  try {
+    const source = await readFile(registryFile, "utf8");
+    const payload = JSON.parse(source);
+    return payload && typeof payload === "object" ? payload : null;
+  } catch (error) {
+    if (error && error.code === "ENOENT") {
+      return null;
+    }
+
+    if (error instanceof SyntaxError) {
+      return null;
+    }
+
+    throw error;
+  }
+}
+
+async function probeSharedServer(registry) {
+  if (!registry || typeof registry.url !== "string" || !registry.url) {
+    return false;
+  }
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => {
+    controller.abort();
+  }, SERVER_PROBE_TIMEOUT_MS);
+
+  try {
+    const response = await fetch(new URL("/api/sessions", registry.url), {
+      signal: controller.signal
+    });
+
+    if (!response.ok) {
+      return false;
+    }
+
+    const payload = await response.json();
+    return (
+      Array.isArray(payload?.sessions) &&
+      Array.isArray(payload?.archivedSessions) &&
+      payload?.roots?.sessionsDir === registry?.roots?.sessionsDir &&
+      payload?.roots?.archivedSessionsDir === registry?.roots?.archivedSessionsDir
+    );
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+function createSharedHandleFromRegistry(registry) {
+  const parsedUrl = new URL(registry.url);
+  const port = Number.parseInt(parsedUrl.port || "", 10);
+
+  return {
+    host: registry.host || parsedUrl.hostname,
+    port: Number.isFinite(registry.port) ? registry.port : Number.isFinite(port) ? port : undefined,
+    preferredPort: Number.isFinite(registry.preferredPort) ? registry.preferredPort : undefined,
+    fallbackUsed: Boolean(registry.fallbackUsed),
+    roots: registry.roots || {},
+    url: registry.url
+  };
+}
+
+function buildRegistryPayload(handle) {
+  return {
+    version: 1,
+    host: handle.host,
+    port: handle.port,
+    preferredPort: handle.preferredPort,
+    fallbackUsed: Boolean(handle.fallbackUsed),
+    roots: handle.roots,
+    url: handle.url,
+    startedAt: new Date().toISOString()
   };
 }
 
@@ -46,19 +143,135 @@ async function createServerHandle(vscode, context) {
   return startWebServer({
     host,
     port,
+    stopWhenIdle: true,
     ...roots
   });
 }
 
-async function ensureServer(vscode, context) {
-  if (!serverHandlePromise) {
-    serverHandlePromise = createServerHandle(vscode, context).catch((error) => {
-      serverHandlePromise = null;
-      throw error;
+async function createOwnedServerState(vscode, context, registryFile = null) {
+  const handle = await createServerHandle(vscode, context);
+
+  try {
+    if (registryFile) {
+      await writeFile(registryFile, JSON.stringify(buildRegistryPayload(handle), null, 2));
+    }
+  } catch (error) {
+    await new Promise((resolve) => {
+      handle.server.close(() => {
+        resolve();
+      });
+    });
+    throw error;
+  }
+
+  return {
+    ownership: "local",
+    handle,
+    registryFile
+  };
+}
+
+async function resolveServerState(vscode, context) {
+  const sharedStorageDir = getSharedStorageDir(context);
+
+  if (!sharedStorageDir) {
+    return createOwnedServerState(vscode, context);
+  }
+
+  await mkdir(sharedStorageDir, { recursive: true });
+  const registryPaths = getRegistryPaths(sharedStorageDir);
+  const existingRegistry = await readRegistry(registryPaths.registryFile);
+
+  if (existingRegistry && (await probeSharedServer(existingRegistry))) {
+    return {
+      ownership: "shared",
+      handle: createSharedHandleFromRegistry(existingRegistry),
+      registryFile: registryPaths.registryFile
+    };
+  }
+
+  if (existingRegistry) {
+    await rm(registryPaths.registryFile, { force: true });
+  }
+
+  return createOwnedServerState(vscode, context, registryPaths.registryFile);
+}
+
+async function isServerStateUsable(state) {
+  if (!state?.handle?.url) {
+    return false;
+  }
+
+  if (state.ownership === "local") {
+    return Boolean(state.handle?.server?.listening);
+  }
+
+  if (state.ownership === "shared") {
+    return probeSharedServer({
+      url: state.handle.url,
+      roots: state.handle.roots
     });
   }
 
-  return serverHandlePromise;
+  return false;
+}
+
+function attachOwnedServerCloseListener(statePromise) {
+  statePromise
+    .then((state) => {
+      if (state.ownership !== "local" || !state.handle?.server) {
+        return;
+      }
+
+      state.handle.server.once("close", () => {
+        removeOwnedRegistry(state).catch(() => {});
+
+        if (serverStatePromise === statePromise) {
+          serverStatePromise = null;
+        }
+      });
+    })
+    .catch(() => {});
+}
+
+async function ensureServerState(vscode, context) {
+  if (serverStatePromise) {
+    const currentPromise = serverStatePromise;
+
+    try {
+      const state = await currentPromise;
+
+      if (serverStatePromise === currentPromise && (await isServerStateUsable(state))) {
+        return state;
+      }
+    } catch {
+      if (serverStatePromise === currentPromise) {
+        serverStatePromise = null;
+      }
+    }
+
+    if (serverStatePromise === currentPromise) {
+      serverStatePromise = null;
+    }
+  }
+
+  if (!serverStatePromise) {
+    const nextPromise = resolveServerState(vscode, context).catch((error) => {
+      if (serverStatePromise === nextPromise) {
+        serverStatePromise = null;
+      }
+      throw error;
+    });
+    serverStatePromise = nextPromise;
+    attachOwnedServerCloseListener(nextPromise);
+  }
+
+  return serverStatePromise;
+}
+
+async function ensureServer(vscode, context) {
+  const state = await ensureServerState(vscode, context);
+  return state.handle;
 }
 
 async function buildLatestPreviewUrl(vscode, context) {
@@ -103,26 +316,61 @@ async function getBrowserUrls(vscode, context, target = "root") {
   };
 }
 
-async function stopServer() {
-  if (!serverHandlePromise) {
-    return false;
+async function removeOwnedRegistry(state) {
+  if (!state?.registryFile) {
+    return;
   }
 
-  const handle = await serverHandlePromise;
-  serverHandlePromise = null;
+  const registry = await readRegistry(state.registryFile);
 
-  await new Promise((resolve, reject) => {
-    handle.server.close((error) => {
-      if (error) {
-        reject(error);
-        return;
-      }
+  if (registry?.url === state.handle?.url) {
+    await rm(state.registryFile, { force: true });
+  }
+}
 
-      resolve();
+async function stopServer() {
+  if (!serverStatePromise) {
+    return {
+      action: "idle"
+    };
+  }
+
+  const statePromise = serverStatePromise;
+  serverStatePromise = null;
+  const state = await statePromise;
+
+  if (state.ownership !== "local" || !state.handle?.server) {
+    return {
+      action: "detached"
+    };
+  }
+
+  let closeError = null;
+
+  try {
+    await new Promise((resolve, reject) => {
+      state.handle.server.close((error) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+
+        resolve();
+      });
     });
-  });
+  } catch (error) {
+    closeError = error;
+  }
 
-  return true;
+  await removeOwnedRegistry(state).catch(() => {});
+
+  if (closeError) {
+    throw closeError;
+  }
+
+  return {
+    action: "stopped"
+  };
 }
 
 module.exports = {

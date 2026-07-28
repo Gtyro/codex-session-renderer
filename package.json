@@ -2,7 +2,7 @@
   "name": "codex-session-renderer",
   "version": "0.1.8",
   "type": "module",
-  "description": "Render Codex session JSONL files to markdown and PNG snapshots.",
+  "description": "Browser-first Codex session browser with export and VS Code integration.",
   "publisher": "gtyro",
   "license": "MIT",
   "repository": {
@@ -38,10 +38,6 @@
       {
         "command": "codexSessionRenderer.copyBrowserUrl",
         "title": "Codex Session Renderer: Copy Browser URL"
-      },
-      {
-        "command": "codexSessionRenderer.stopServer",
-        "title": "Codex Session Renderer: Stop Session Browser"
       },
       {
         "command": "codexSessionRenderer.runSelfCheck",

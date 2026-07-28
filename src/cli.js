@@ -32,7 +32,7 @@ Options:
   --install-fonts               Download the pinned Chinese font assets into this install
   --serve                       Start the built-in web UI for browsing and managing sessions
   --host <host>                 Web UI host (default: 127.0.0.1)
-  --port <port>                 Web UI port (default: 4311, use 0 for a random free port)
+  --port <port>                 Web UI port (default: prefer 4311, fall back if busy; use 0 for a random free port)
   --latest                      Render the latest session file
   --id <session-id>             Render a specific session by ID or unique ID fragment
   --sessions-dir <path>         Override the default sessions dir
@@ -64,7 +64,7 @@ function parseArgs(argv) {
     installFonts: false,
     serve: false,
     host: "127.0.0.1",
-    port: 4311,
+    port: null,
     latest: false,
     id: null,
     sessionsDir: getDefaultSessionsDir(),
@@ -189,7 +189,7 @@ function parseArgs(argv) {
     fail("--width must be a number greater than or equal to 720.");
   }
 
-  if (!Number.isFinite(options.port) || options.port < 0 || options.port > 65535) {
+  if (options.port !== null && (!Number.isFinite(options.port) || options.port < 0 || options.port > 65535)) {
     fail("--port must be an integer between 0 and 65535.");
   }
 

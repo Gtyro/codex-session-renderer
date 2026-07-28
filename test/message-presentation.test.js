@@ -363,6 +363,257 @@ test("session renderers show literal image markers in user text as code beside i
   assert.match(interactive.items[0].renderedHtml, /message-image-card/);
 });
 
+test("interactive session derives token stats from token snapshots", () => {
+  const user = {
+    kind: "message",
+    role: "user",
+    timestamp: "2026-06-23T00:00:00.000Z",
+    text: "需求 A"
+  };
+  const assistant = {
+    kind: "message",
+    role: "assistant",
+    timestamp: "2026-06-23T00:00:01.000Z",
+    text: "处理中",
+    phase: "commentary"
+  };
+  const toolCall = {
+    kind: "tool_call",
+    timestamp: "2026-06-23T00:00:02.000Z",
+    name: "exec_command",
+    body: "echo hello"
+  };
+  const toolOutput = {
+    kind: "tool_output",
+    timestamp: "2026-06-23T00:00:03.000Z",
+    name: "exec_command",
+    body: "ok"
+  };
+  const interactive = buildInteractiveSession({
+    id: "session-demo",
+    filePath: "/tmp/session-demo.jsonl",
+    startedAt: "2026-06-23T00:00:00.000Z",
+    cwd: "/tmp",
+    source: "codex",
+    originator: "codex",
+    cliVersion: "0.0.0",
+    modelProvider: "openai",
+    items: [user, assistant, toolCall, toolOutput],
+    tokenSnapshots: [
+      {
+        tokens: 100,
+        cumulativeTokens: 100,
+        inputTokens: 80,
+        cachedInputTokens: 0,
+        outputTokens: 20,
+        reasoningOutputTokens: 0,
+        startIndex: 0,
+        endIndex: 2,
+        items: [user, assistant]
+      },
+      {
+        tokens: 50,
+        cumulativeTokens: 150,
+        inputTokens: 20,
+        cachedInputTokens: 0,
+        outputTokens: 30,
+        reasoningOutputTokens: 0,
+        startIndex: 2,
+        endIndex: 4,
+        items: [toolCall, toolOutput]
+      }
+    ]
+  });
+
+  assert.equal(interactive.tokenStats.totalTokens, 150);
+  assert.ok(interactive.tokenStats.knownTokens < interactive.tokenStats.totalTokens);
+  assert.ok(interactive.tokenStats.hiddenTokens > 0);
+  assert.ok(interactive.tokenStats.categories.some((entry) => entry.key === "assistant"));
+  assert.ok(interactive.tokenStats.categories.some((entry) => entry.key === "tool"));
+  assert.ok(interactive.tokenStats.categories.some((entry) => entry.key === "hidden"));
+  assert.equal(interactive.tokenSegments.length, 2);
+  assert.equal(interactive.tokenSegments[0].startIndex, 0);
+  assert.equal(interactive.tokenSegments[1].endIndex, 4);
+  assert.equal(interactive.tokenStats.toolStats.totalCount, 2);
+  assert.deepEqual(interactive.tokenStats.unattributedStats, {
+    totalCount: 2,
+    webSearchCount: 0,
+    truncatedCount: 0,
+    noVisibleDataCount: 0,
+    residualCount: 2
+  });
+});
+
+test("interactive session groups web_search token usage by call and overall share", () => {
+  const user = {
+    kind: "message",
+    role: "user",
+    timestamp: "2026-06-23T00:00:00.000Z",
+    text: "需求 A"
+  };
+  const assistant = {
+    kind: "message",
+    role: "assistant",
+    timestamp: "2026-06-23T00:00:01.000Z",
+    text: "处理中",
+    phase: "commentary"
+  };
+  const webSearchCall = {
+    kind: "tool_call",
+    timestamp: "2026-06-23T00:00:02.000Z",
+    name: "web_search",
+    callId: "ws-1",
+    body: "{\n  \"query\": \"codex\"\n}"
+  };
+  const webSearchOutput = {
+    kind: "tool_output",
+    timestamp: "2026-06-23T00:00:03.000Z",
+    name: "web_search",
+    callId: "ws-1",
+    body: "{\n  \"results\": []\n}"
+  };
+  const execCall = {
+    kind: "tool_call",
+    timestamp: "2026-06-23T00:00:04.000Z",
+    name: "exec_command",
+    callId: "exec-1",
+    body: "echo hello"
+  };
+  const execOutput = {
+    kind: "tool_output",
+    timestamp: "2026-06-23T00:00:05.000Z",
+    name: "exec_command",
+    callId: "exec-1",
+    body: "ok"
+  };
+  const interactive = buildInteractiveSession({
+    id: "session-demo",
+    filePath: "/tmp/session-demo.jsonl",
+    startedAt: "2026-06-23T00:00:00.000Z",
+    cwd: "/tmp",
+    source: "codex",
+    originator: "codex",
+    cliVersion: "0.0.0",
+    modelProvider: "openai",
+    items: [user, assistant, webSearchCall, webSearchOutput, execCall, execOutput],
+    tokenSnapshots: [
+      {
+        tokens: 100,
+        cumulativeTokens: 100,
+        inputTokens: 80,
+        cachedInputTokens: 0,
+        outputTokens: 20,
+        reasoningOutputTokens: 0,
+        startIndex: 0,
+        endIndex: 2,
+        items: [user, assistant]
+      },
+      {
+        tokens: 30,
+        cumulativeTokens: 130,
+        inputTokens: 10,
+        cachedInputTokens: 0,
+        outputTokens: 20,
+        reasoningOutputTokens: 0,
+        startIndex: 0,
+        endIndex: 2,
+        items: [webSearchCall, webSearchOutput]
+      },
+      {
+        tokens: 20,
+        cumulativeTokens: 150,
+        inputTokens: 8,
+        cachedInputTokens: 0,
+        outputTokens: 12,
+        reasoningOutputTokens: 0,
+        startIndex: 2,
+        endIndex: 4,
+        items: [execCall, execOutput]
+      }
+    ]
+  });
+
+  const webSearchGroup = interactive.tokenStats.toolStats.groups.find((entry) => entry.key === "web_search");
+
+  assert.ok(webSearchGroup);
+  assert.equal(interactive.tokenStats.toolStats.totalCount, 2);
+  assert.equal(webSearchGroup.count, 1);
+  assert.equal(webSearchGroup.instances[0].shareOfToolTotal, 1);
+  assert.ok(interactive.tokenStats.hiddenTokens > 0);
+  assert.ok(interactive.tokenStats.categories.some((entry) => entry.key === "hidden"));
+  assert.deepEqual(interactive.tokenStats.unattributedStats, {
+    totalCount: 3,
+    webSearchCount: 1,
+    truncatedCount: 0,
+    noVisibleDataCount: 0,
+    residualCount: 2
+  });
+});
+
+test("interactive session carries explicit truncation markers into tool stats", () => {
+  const user = {
+    kind: "message",
+    role: "user",
+    timestamp: "2026-06-23T00:00:00.000Z",
+    text: "需求 A"
+  };
+  const toolCall = {
+    kind: "tool_call",
+    timestamp: "2026-06-23T00:00:01.000Z",
+    name: "exec_command",
+    callId: "exec-1",
+    body: "rg foo"
+  };
+  const toolOutput = {
+    kind: "tool_output",
+    timestamp: "2026-06-23T00:00:02.000Z",
+    name: "exec_command",
+    callId: "exec-1",
+    body: "Total output lines: 3034\n/tmp/demo",
+    isTruncated: true,
+    truncationReason: "日志截断"
+  };
+  const interactive = buildInteractiveSession({
+    id: "session-demo",
+    filePath: "/tmp/session-demo.jsonl",
+    startedAt: "2026-06-23T00:00:00.000Z",
+    cwd: "/tmp",
+    source: "codex",
+    originator: "codex",
+    cliVersion: "0.0.0",
+    modelProvider: "openai",
+    items: [user, toolCall, toolOutput],
+    tokenSnapshots: [
+      {
+        tokens: 100,
+        cumulativeTokens: 100,
+        inputTokens: 60,
+        cachedInputTokens: 0,
+        outputTokens: 40,
+        reasoningOutputTokens: 0,
+        startIndex: 0,
+        endIndex: 3,
+        items: [user, toolCall, toolOutput]
+      }
+    ]
+  });
+
+  const execGroup = interactive.tokenStats.toolStats.groups.find((entry) => entry.key === "exec_command");
+
+  assert.equal(interactive.tokenStats.explicitTruncationCount, 1);
+  assert.ok(execGroup);
+  assert.equal(execGroup.truncatedCount, 1);
+  assert.equal(execGroup.instances[0].isTruncated, true);
+  assert.equal(execGroup.instances[0].truncationReason, "日志截断");
+  assert.deepEqual(interactive.tokenStats.unattributedStats, {
+    totalCount: 1,
+    webSearchCount: 0,
+    truncatedCount: 1,
+    noVisibleDataCount: 0,
+    residualCount: 0
+  });
+});
+
 test("session renderers hide standalone proposed plan wrapper markers in assistant output", async () => {
   const tempDir = await mkdtemp(path.join(os.tmpdir(), "csr-message-presentation-"));
   const filePath = path.join(tempDir, "session.jsonl");

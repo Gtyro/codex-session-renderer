@@ -84,7 +84,8 @@ export function renderMarkdownDocument({
   markdown: markdownSource,
   generatedAt,
   titleSuffix = null,
-  fontUrls = getOptionalInstalledFontUrls()
+  fontUrls = getOptionalInstalledFontUrls(),
+  includeBrowserClientLifecycleTracking = false
 }) {
   const body = enhanceRenderedBody(renderMarkdownFragment(markdownSource));
   const subtitle = [
@@ -411,6 +412,11 @@ export function renderMarkdownDocument({
         node.addEventListener("toggle", sync);
       });
     </script>
+    ${
+      includeBrowserClientLifecycleTracking
+        ? '<script type="module" src="/assets/browser-client-lifecycle.js"></script>'
+        : ""
+    }
   </body>
 </html>
 `;

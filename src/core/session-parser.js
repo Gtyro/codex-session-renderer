@@ -199,6 +199,54 @@ function safeJson(value) {
   return JSON.stringify(value, null, 2);
 }
 
+function detectToolTextTruncation(value) {
+  const text = normalizeText(value);
+
+  if (!text) {
+    return {
+      isTruncated: false,
+      truncationReason: null
+    };
+  }
+
+  if (
+    /warning:\s*truncated output/iu.test(text) ||
+    /\b\d+\s+tokens truncated\b/iu.test(text) ||
+    /\b\d+\s+bytes omitted\b/iu.test(text) ||
+    /\btotal output lines:\s*\d+\b/iu.test(text)
+  ) {
+    return {
+      isTruncated: true,
+      truncationReason: "日志截断"
+    };
+  }
+
+  return {
+    isTruncated: false,
+    truncationReason: null
+  };
+}
+
+function parseTokenUsageInfo(info) {
+  const lastTokenUsage = info?.last_token_usage ?? {};
+  const totalTokenUsage = info?.total_token_usage ?? {};
+  const totalTokens = Number(lastTokenUsage.total_tokens);
+  const cumulativeTokens = Number(totalTokenUsage.total_tokens);
+
+  if (!Number.isFinite(totalTokens) || totalTokens <= 0) {
+    return null;
+  }
+
+  return {
+    totalTokens,
+    cumulativeTokens: Number.isFinite(cumulativeTokens) ? cumulativeTokens : totalTokens,
+    inputTokens: Number(lastTokenUsage.input_tokens) || 0,
+    cachedInputTokens: Number(lastTokenUsage.cached_input_tokens) || 0,
+    outputTokens: Number(lastTokenUsage.output_tokens) || 0,
+    reasoningOutputTokens: Number(lastTokenUsage.reasoning_output_tokens) || 0
+  };
+}
+
 function buildToolCall(payload, timestamp) {
   if (payload.type === "function_call") {
     const parsedArguments = parsePossibleJson(payload.arguments);
@@ -252,27 +300,39 @@ function buildToolCall(payload, timestamp) {
 
 function buildToolOutput(payload, timestamp, toolName) {
   if (payload.type === "function_call_output") {
+    const body = normalizeText(payload.output);
+    const truncation = detectToolTextTruncation(body);
+
     return {
       kind: "tool_output",
       timestamp,
       toolType: "function_call_output",
       name: toolName,
       callId: payload.call_id || null,
-      body: normalizeText(payload.output),
-      language: "text"
+      body,
+      language: "text",
+      isTruncated: truncation.isTruncated,
+      truncationReason: truncation.truncationReason
     };
   }
 
   if (payload.type === "custom_tool_call_output") {
     const parsed = parsePossibleJson(payload.output);
+    const body = typeof parsed === "string" ? normalizeText(parsed) : safeJson(parsed);
+    const truncation = typeof parsed === "string"
+      ? detectToolTextTruncation(body)
+      : { isTruncated: false, truncationReason: null };
+
     return {
       kind: "tool_output",
       timestamp,
       toolType: "custom_tool_call_output",
       name: toolName,
       callId: payload.call_id || null,
-      body: typeof parsed === "string" ? normalizeText(parsed) : safeJson(parsed),
-      language: typeof parsed === "string" ? "text" : "json"
+      body,
+      language: typeof parsed === "string" ? "text" : "json",
+      isTruncated: truncation.isTruncated,
+      truncationReason: truncation.truncationReason
     };
   }
 
@@ -300,11 +360,71 @@ export async function loadSession(filePath, options = {}) {
     originator: meta.originator || null,
     cliVersion: meta.cli_version || null,
     modelProvider: meta.model_provider || null,
-    items: []
+    items: [],
+    tokenSnapshots: []
   };
   const toolNamesByCallId = new Map();
+  let pendingTokenSnapshotStartIndex = 0;
+  let runEpoch = 0;
+  let lastTokenSnapshotKey = null;
+
+  function resetTokenSnapshotWindow() {
+    pendingTokenSnapshotStartIndex = session.items.length;
+    lastTokenSnapshotKey = null;
+  }
+
+  function recordTokenSnapshot(payload, timestamp) {
+    const usage = parseTokenUsageInfo(payload.info);
+
+    if (!usage) {
+      return;
+    }
+
+    const snapshotKey = [
+      runEpoch,
+      usage.cumulativeTokens,
+      usage.totalTokens,
+      usage.inputTokens,
+      usage.cachedInputTokens,
+      usage.outputTokens,
+      usage.reasoningOutputTokens
+    ].join(":");
+
+    if (snapshotKey === lastTokenSnapshotKey) {
+      return;
+    }
+
+    lastTokenSnapshotKey = snapshotKey;
+    const segmentItems = session.items.slice(pendingTokenSnapshotStartIndex);
+
+    session.tokenSnapshots.push({
+      timestamp,
+      tokens: usage.totalTokens,
+      ...usage,
+      startIndex: pendingTokenSnapshotStartIndex,
+      endIndex: session.items.length,
+      items: segmentItems
+    });
+
+    pendingTokenSnapshotStartIndex = session.items.length;
+  }
 
   for (const entry of lines) {
+    if (entry.type === "event_msg") {
+      const payload = entry.payload || {};
+
+      if (payload.type === "task_started" || payload.type === "thread_rolled_back") {
+        runEpoch += 1;
+        resetTokenSnapshotWindow();
+      }
+
+      if (payload.type === "token_count") {
+        recordTokenSnapshot(payload, entry.timestamp || null);
+      }
+
+      continue;
+    }
+
     if (entry.type !== "response_item") {
       continue;
     }
@@ -389,6 +509,47 @@ export async function loadSession(filePath, options = {}) {
   return session;
 }
 
+function sliceTokenSnapshots(tokenSnapshots, startIndex) {
+  const sourceSnapshots = Array.isArray(tokenSnapshots) ? tokenSnapshots : [];
+
+  if (!Number.isFinite(startIndex) || startIndex <= 0) {
+    return sourceSnapshots.map((snapshot) => ({
+      ...snapshot,
+      items: Array.isArray(snapshot.items) ? [...snapshot.items] : []
+    }));
+  }
+
+  const slicedSnapshots = [];
+
+  for (const snapshot of sourceSnapshots) {
+    const snapshotStartIndex = Number(snapshot.startIndex) || 0;
+    const snapshotEndIndex = Number(snapshot.endIndex) || snapshotStartIndex;
+
+    if (snapshotEndIndex <= startIndex) {
+      continue;
+    }
+
+    const originalItems = Array.isArray(snapshot.items) ? snapshot.items : [];
+    const retainedStartIndex = Math.max(0, startIndex - snapshotStartIndex);
+    const retainedItems = originalItems.slice(retainedStartIndex);
+    const retainedItemCount = retainedItems.length;
+    const originalItemCount = originalItems.length;
+    const retainedRatio =
+      originalItemCount > 0 ? retainedItemCount / originalItemCount : 1;
+
+    slicedSnapshots.push({
+      ...snapshot,
+      startIndex: Math.max(0, snapshotStartIndex - startIndex),
+      endIndex: Math.max(0, snapshotEndIndex - startIndex),
+      tokens:
+        originalItemCount > 0 && retainedRatio < 1 ? snapshot.tokens * retainedRatio : snapshot.tokens,
+      items: retainedItems
+    });
+  }
+
+  return slicedSnapshots;
+}
+
 export function selectRecentRounds(session, rounds) {
   const conversationRounds = splitConversationRounds(session.items);
   const totalRounds = conversationRounds.length;
@@ -417,10 +578,12 @@ export function selectRecentRounds(session, rounds) {
 
   const selectedRounds = conversationRounds.slice(totalRounds - rounds);
   const startIndex = selectedRounds[0].startIndex;
+  const tokenSnapshots = sliceTokenSnapshots(session.tokenSnapshots, startIndex);
 
   return {
     ...session,
     items: session.items.slice(startIndex),
+    tokenSnapshots,
     selection: {
       mode: "recent_rounds",
       roundsRequested: rounds,

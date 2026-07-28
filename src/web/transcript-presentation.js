@@ -30,6 +30,43 @@ export function groupTranscriptItems(items) {
   return entries;
 }
 
+export function groupTranscriptItemsWithRanges(items, startIndex = 0) {
+  const sourceItems = Array.isArray(items) ? items : [];
+  const entries = [];
+
+  for (let index = 0; index < sourceItems.length; index += 1) {
+    const item = sourceItems[index];
+    const nextItem = sourceItems[index + 1];
+    const absoluteIndex = startIndex + index;
+
+    if (
+      item?.kind === "tool_call" &&
+      item.callId &&
+      nextItem?.kind === "tool_output" &&
+      nextItem.callId === item.callId
+    ) {
+      entries.push({
+        kind: "tool_interaction",
+        call: item,
+        output: nextItem,
+        startIndex: absoluteIndex,
+        endIndex: absoluteIndex + 2
+      });
+      index += 1;
+      continue;
+    }
+
+    entries.push({
+      kind: "single",
+      item,
+      startIndex: absoluteIndex,
+      endIndex: absoluteIndex + 1
+    });
+  }
+
+  return entries;
+}
+
 export function getTranscriptEntryTimestamp(entry) {
   if (entry?.kind === "tool_interaction") {
     return entry.output?.timestamp || entry.call?.timestamp || "";

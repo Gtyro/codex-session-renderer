@@ -1,6 +1,8 @@
+import { startBrowserClientLifecycleTracking } from "./browser-client-lifecycle.js";
 import {
   getTranscriptEntryTimestamp,
   groupTranscriptItems,
+  groupTranscriptItemsWithRanges,
   splitEntriesIntoDisplaySegments
 } from "./transcript-presentation.js";
 import {
@@ -58,7 +60,12 @@ const state = {
   detailRequestId: 0,
   detailSignature: null,
   detailSession: null,
-  transcriptJumpIndex: null
+  transcriptJumpIndex: null,
+  tokenRailActiveIndex: null,
+  tokenRailAnchors: [],
+  tokenRailSegments: [],
+  tokenRailTotalTokens: 0,
+  tokenRailSyncQueued: false
 };
 
 const elements = {
@@ -99,11 +106,37 @@ const elements = {
   viewerCard: document.querySelector(".viewer-card"),
   emptyState: document.querySelector("#empty-state"),
   transcriptToolbar: document.querySelector("#transcript-toolbar"),
+  transcriptTokenCard: document.querySelector("#transcript-token-card"),
+  transcriptTokenNote: document.querySelector("#transcript-token-note"),
+  transcriptTokenTotal: document.querySelector("#transcript-token-total"),
+  transcriptTokenSummary: document.querySelector("#transcript-token-summary"),
+  transcriptTokenBar: document.querySelector("#transcript-token-bar"),
+  transcriptTokenLegend: document.querySelector("#transcript-token-legend"),
+  transcriptTokenToolsNote: document.querySelector("#transcript-token-tools-note"),
+  transcriptTokenTools: document.querySelector("#transcript-token-tools"),
+  transcriptTokenRail: document.querySelector("#transcript-token-rail"),
+  transcriptTokenRailNote: document.querySelector("#transcript-token-rail-note"),
+  transcriptTokenRailTotal: document.querySelector("#transcript-token-rail-total"),
+  transcriptTokenRailCurrent: document.querySelector("#transcript-token-rail-current"),
+  transcriptTokenRailTrack: document.querySelector("#transcript-token-rail-track"),
   expandToolsButton: document.querySelector("#expand-tools-button"),
   collapseToolsButton: document.querySelector("#collapse-tools-button"),
   transcriptStats: document.querySelector("#transcript-stats"),
   transcriptRoot: document.querySelector("#transcript-root")
 };
+
+const TOKEN_RAIL_COLORS = [
+  "#0f766e",
+  "#2563eb",
+  "#d97706",
+  "#7c3aed",
+  "#dc2626",
+  "#059669",
+  "#0ea5e9",
+  "#db2777"
+];
+
+startBrowserClientLifecycleTracking().catch(() => {});
 
 function getAllSessions() {
   return [...state.sessions, ...state.archivedSessions];
@@ -302,22 +335,6 @@ function initializeRouteState() {
   syncOptionControls();
 }
 
-function loadSidebarPreference() {
-  try {
-    return window.localStorage.getItem("csr.sidebar.collapsed") === "1";
-  } catch {
-    return false;
-  }
-}
-
-function saveSidebarPreference() {
-  try {
-    window.localStorage.setItem("csr.sidebar.collapsed", state.sidebarCollapsed ? "1" : "0");
-  } catch {
-    // Ignore storage failures.
-  }
-}
-
 function formatLocalTime(value) {
   try {
     return new Intl.DateTimeFormat(undefined, {
@@ -353,6 +370,32 @@ function formatBytes(value) {
   return `${size.toFixed(size >= 10 ? 0 : 1)} ${unit}`;
 }
 
+function formatTokenCount(value) {
+  if (!Number.isFinite(value)) {
+    return "-";
+  }
+
+  const absolute = Math.abs(value);
+
+  if (absolute >= 1_000_000) {
+    return `${(value / 1_000_000).toFixed(absolute >= 10_000_000 ? 0 : 1)}M`;
+  }
+
+  if (absolute >= 1_000) {
+    return `${(value / 1_000).toFixed(absolute >= 10_000 ? 0 : 1)}k`;
+  }
+
+  return `${Math.round(value)}`;
+}
+
+function formatTokenPercent(value) {
+  if (!Number.isFinite(value)) {
+    return "-";
+  }
+
+  return `${value.toFixed(1)}%`;
+}
+
 function describeRoundSelection(session) {
   const selection = session?.selection;
 
@@ -380,6 +423,527 @@ function describeRoundSelection(session) {
 
 function getLocationLabel(location) {
   return location === "archived_sessions" ? "归档" : "活动";
+}
+
+function clearTokenDistribution() {
+  elements.transcriptTokenCard.hidden = true;
+  elements.transcriptTokenNote.textContent = "-";
+  elements.transcriptTokenTotal.textContent = "-";
+  elements.transcriptTokenSummary.replaceChildren();
+  elements.transcriptTokenBar.replaceChildren();
+  elements.transcriptTokenLegend.replaceChildren();
+  elements.transcriptTokenToolsNote.textContent = "-";
+  elements.transcriptTokenTools.replaceChildren();
+}
+
+function clearTokenRail() {
+  state.tokenRailActiveIndex = null;
+  state.tokenRailAnchors = [];
+  state.tokenRailSegments = [];
+  state.tokenRailTotalTokens = 0;
+  elements.transcriptTokenRail.hidden = true;
+  elements.transcriptTokenRailNote.textContent = "-";
+  elements.transcriptTokenRailTotal.textContent = "-";
+  elements.transcriptTokenRailCurrent.textContent = "-";
+  elements.transcriptTokenRailTrack.replaceChildren();
+  elements.transcriptTokenRailTrack.style.height = "";
+}
+
+function formatTokenRailSegmentLabel(segment, totalTokens) {
+  const percent = totalTokens > 0 ? (segment.tokens / totalTokens) * 100 : 0;
+  return `${formatTokenCount(segment.tokens)} tok · ${formatTokenPercent(percent)}`;
+}
+
+function getTokenRailColor(index) {
+  return TOKEN_RAIL_COLORS[index % TOKEN_RAIL_COLORS.length];
+}
+
+function applyItemRangeAttributes(element, range) {
+  if (!(element instanceof HTMLElement) || !range) {
+    return;
+  }
+
+  element.dataset.itemStartIndex = String(range.startIndex);
+  element.dataset.itemEndIndex = String(range.endIndex);
+}
+
+function createTokenRailSegment(segment, totalTokens) {
+  const item = document.createElement("article");
+  item.className = "transcript-token-segment";
+  item.dataset.segmentIndex = String(segment.index - 1);
+  item.style.setProperty("--token-color", getTokenRailColor(segment.index - 1));
+
+  const title = document.createElement("div");
+  title.className = "transcript-token-segment-title";
+  title.textContent = `第 ${segment.index} 段`;
+
+  const meta = document.createElement("div");
+  meta.className = "transcript-token-segment-meta";
+  meta.textContent = formatTokenRailSegmentLabel(segment, totalTokens);
+
+  item.append(title, meta);
+  item.title = `${title.textContent} · ${meta.textContent}`;
+  return item;
+}
+
+function findBestRailNode(nodes, itemIndex) {
+  let bestNode = null;
+  let bestSpan = Number.POSITIVE_INFINITY;
+
+  for (const node of nodes) {
+    const startIndex = Number(node.dataset.itemStartIndex);
+    const endIndex = Number(node.dataset.itemEndIndex);
+
+    if (!Number.isFinite(startIndex) || !Number.isFinite(endIndex)) {
+      continue;
+    }
+
+    if (itemIndex < startIndex || itemIndex >= endIndex) {
+      continue;
+    }
+
+    const span = Math.max(1, endIndex - startIndex);
+
+    if (span < bestSpan) {
+      bestSpan = span;
+      bestNode = node;
+    }
+  }
+
+  return bestNode;
+}
+
+function layoutTokenRail() {
+  if (elements.transcriptTokenRail.hidden || state.tokenRailSegments.length === 0) {
+    return;
+  }
+
+  const candidateNodes = Array.from(
+    elements.transcriptRoot.querySelectorAll("[data-item-start-index][data-item-end-index]")
+  );
+  const transcriptRootRect = elements.transcriptRoot.getBoundingClientRect();
+  const transcriptHeight = Math.max(elements.transcriptRoot.scrollHeight, transcriptRootRect.height, 1);
+  const positionedSegments = state.tokenRailSegments.map((segment) => {
+    const startNode = findBestRailNode(candidateNodes, segment.startIndex);
+    const endNode = findBestRailNode(candidateNodes, Math.max(segment.startIndex, segment.endIndex - 1));
+
+    if (startNode && endNode) {
+      const startRect = startNode.getBoundingClientRect();
+      const endRect = endNode.getBoundingClientRect();
+      const top = Math.max(0, startRect.top - transcriptRootRect.top);
+      const bottom = Math.max(top + 24, endRect.bottom - transcriptRootRect.top);
+
+      return {
+        ...segment,
+        startNode,
+        top,
+        height: bottom - top
+      };
+    }
+
+    return {
+      ...segment,
+      startNode: null,
+      top: 0,
+      height: Math.max(24, transcriptHeight / Math.max(1, state.tokenRailSegments.length))
+    };
+  });
+
+  elements.transcriptTokenRailTrack.style.height = `${transcriptHeight}px`;
+  elements.transcriptTokenRailTrack.replaceChildren(
+    ...positionedSegments.map((segment) => {
+      const item = createTokenRailSegment(segment, state.tokenRailTotalTokens);
+      item.style.top = `${segment.top}px`;
+      item.style.height = `${segment.height}px`;
+      return item;
+    })
+  );
+  state.tokenRailAnchors = positionedSegments.map((segment) => segment.startNode);
+}
+
+function renderTokenRail(tokenSegments, tokenStats) {
+  const segments = Array.isArray(tokenSegments) ? tokenSegments.filter((segment) => Number.isFinite(segment.tokens) && segment.tokens > 0) : [];
+
+  if (!tokenStats || segments.length === 0) {
+    clearTokenRail();
+    return;
+  }
+
+  const totalTokens = Number.isFinite(tokenStats.totalTokens) && tokenStats.totalTokens > 0
+    ? tokenStats.totalTokens
+    : segments.reduce((sum, segment) => sum + segment.tokens, 0);
+
+  elements.transcriptTokenRail.hidden = false;
+  elements.transcriptTokenRailNote.textContent = "按 token_count 分段";
+  elements.transcriptTokenRailTotal.textContent = `${formatTokenCount(totalTokens)} tok`;
+  state.tokenRailSegments = segments;
+  state.tokenRailTotalTokens = totalTokens;
+  state.tokenRailActiveIndex = null;
+  layoutTokenRail();
+  scheduleTokenRailSync({ rebuildAnchors: true });
+}
+
+function getTokenRailMarkerLine() {
+  const paneRect = elements.chatPane.getBoundingClientRect();
+  return paneRect.top + Math.min(180, Math.max(104, paneRect.height * 0.18));
+}
+
+function updateTokenRailHighlight(activeIndex) {
+  if (state.tokenRailActiveIndex === activeIndex) {
+    return;
+  }
+
+  state.tokenRailActiveIndex = activeIndex;
+  const items = elements.transcriptTokenRail.querySelectorAll(".transcript-token-segment");
+
+  items.forEach((item) => {
+    const isActive = Number(item.dataset.segmentIndex) === activeIndex;
+    item.classList.toggle("is-active", isActive);
+    item.setAttribute("aria-current", isActive ? "true" : "false");
+  });
+
+  const activeSegment = Number.isInteger(activeIndex)
+    ? state.tokenRailSegments.find((segment) => segment.index - 1 === activeIndex) ?? null
+    : null;
+
+  if (activeSegment) {
+    const totalTokens = state.tokenRailTotalTokens;
+    const percent = totalTokens > 0 ? (activeSegment.tokens / totalTokens) * 100 : 0;
+    elements.transcriptTokenRailCurrent.textContent = `当前第 ${activeSegment.index} 段 · ${formatTokenPercent(percent)} · ${formatTokenCount(activeSegment.tokens)} tok`;
+    elements.transcriptTokenRailCurrent.title = elements.transcriptTokenRailCurrent.textContent;
+  } else {
+    elements.transcriptTokenRailCurrent.textContent = "-";
+    elements.transcriptTokenRailCurrent.title = "";
+  }
+}
+
+function syncTokenRailFromScroll() {
+  if (elements.transcriptTokenRail.hidden) {
+    return;
+  }
+
+  const anchors = state.tokenRailAnchors;
+
+  if (anchors.length === 0) {
+    updateTokenRailHighlight(null);
+    return;
+  }
+
+  const markerLine = getTokenRailMarkerLine();
+  let activeIndex = 0;
+
+  for (let index = 0; index < anchors.length; index += 1) {
+    const node = anchors[index];
+
+    if (!(node instanceof Element) || !node.isConnected) {
+      continue;
+    }
+
+    const rect = node.getBoundingClientRect();
+
+    if (rect.top <= markerLine) {
+      activeIndex = index;
+    } else {
+      break;
+    }
+  }
+
+  updateTokenRailHighlight(activeIndex);
+}
+
+function scheduleTokenRailSync({ rebuildAnchors = false } = {}) {
+  if (rebuildAnchors) {
+    state.tokenRailAnchors = [];
+  }
+
+  if (state.tokenRailSyncQueued) {
+    return;
+  }
+
+  state.tokenRailSyncQueued = true;
+  window.requestAnimationFrame(() => {
+    state.tokenRailSyncQueued = false;
+    if (!elements.transcriptTokenRail.hidden) {
+      if (rebuildAnchors) {
+        layoutTokenRail();
+      }
+      syncTokenRailFromScroll();
+    }
+  });
+}
+
+function createTokenMetric(label, value, note) {
+  const item = document.createElement("div");
+  item.className = "token-summary-item";
+
+  const metricLabel = document.createElement("div");
+  metricLabel.className = "token-summary-label";
+  metricLabel.textContent = label;
+
+  const metricValue = document.createElement("div");
+  metricValue.className = "token-summary-value";
+  metricValue.textContent = value;
+
+  item.append(metricLabel, metricValue);
+
+  if (note) {
+    const metricNote = document.createElement("div");
+    metricNote.className = "token-summary-note";
+    metricNote.textContent = note;
+    item.append(metricNote);
+  }
+
+  return item;
+}
+
+function createTokenChip(label, value) {
+  const chip = document.createElement("span");
+  chip.className = "token-chip";
+  chip.textContent = `${label}: ${value}`;
+  return chip;
+}
+
+function formatTokenShareText(tokens, totalTokens) {
+  const percent = totalTokens > 0 ? (tokens / totalTokens) * 100 : 0;
+  return `${formatTokenCount(tokens)} tok · ${formatTokenPercent(percent)}`;
+}
+
+function renderToolInstance(instance, groupTokens, totalTokens) {
+  const row = document.createElement("article");
+  row.className = "token-instance";
+
+  const header = document.createElement("div");
+  header.className = "token-instance-header";
+
+  const title = document.createElement("div");
+  title.className = "token-instance-title";
+  title.textContent = instance.isTruncated ? `#${instance.index} · 截断` : `#${instance.index}`;
+
+  const meta = document.createElement("div");
+  meta.className = "token-instance-meta";
+  const overall = formatTokenPercent(instance.shareOfOverall * 100);
+  const withinTool = formatTokenPercent(instance.shareOfToolTotal * 100);
+  meta.textContent = [
+    `${formatTokenCount(instance.tokens)} tok`,
+    `${withinTool} of ${instance.name}`,
+    `${overall} overall`,
+    instance.isTruncated ? (instance.truncationReason || "日志截断") : null
+  ]
+    .filter(Boolean)
+    .join(" · ");
+
+  header.append(title, meta);
+
+  const body = document.createElement("div");
+  body.className = "token-instance-body";
+
+  const preview = document.createElement("div");
+  preview.className = "token-instance-preview";
+  preview.textContent = instance.preview || "No data";
+  body.append(preview);
+
+  if (instance.isTruncated) {
+    const truncation = document.createElement("div");
+    truncation.className = "token-instance-detail token-instance-truncation";
+    truncation.textContent = instance.truncationReason || "日志截断";
+    body.append(truncation);
+  }
+
+  if (instance.callPreview || instance.outputPreview) {
+    const detail = document.createElement("div");
+    detail.className = "token-instance-detail";
+    detail.textContent = [
+      instance.callPreview ? `Input: ${instance.callPreview}` : null,
+      instance.outputPreview ? `Output: ${instance.outputPreview}` : null
+    ]
+      .filter(Boolean)
+      .join(" · ");
+    body.append(detail);
+  }
+
+  const bar = document.createElement("div");
+  bar.className = "token-instance-bar";
+  const fill = document.createElement("div");
+  fill.className = "token-instance-fill";
+  fill.style.width = `${Math.max(2, instance.shareOfToolTotal * 100)}%`;
+  bar.append(fill);
+
+  row.append(header, body, bar);
+  row.title = `${instance.name} · ${formatTokenShareText(instance.tokens, totalTokens)} · ${formatTokenPercent(instance.shareOfToolTotal * 100)} of ${instance.name}`;
+
+  return row;
+}
+
+function renderToolGroup(group, totalTokens, index) {
+  const details = document.createElement("details");
+  details.className = "token-tool-group";
+  details.open = false;
+
+  const summary = document.createElement("summary");
+  summary.className = "token-tool-summary";
+
+  const left = document.createElement("div");
+  left.className = "token-tool-summary-left";
+
+  const badge = document.createElement("span");
+  badge.className = "token-tool-badge";
+  badge.style.setProperty("--token-color", group.color);
+  badge.textContent = group.label;
+
+  const title = document.createElement("div");
+  title.className = "token-tool-title";
+  title.textContent = `${group.label} · ${group.count} 次`;
+
+  const subtitle = document.createElement("div");
+  subtitle.className = "token-tool-subtitle";
+  subtitle.textContent = [
+    `${formatTokenCount(group.tokens)} tok`,
+    `${formatTokenPercent(group.shareOfOverall * 100)} overall`,
+    `${formatTokenPercent(group.shareOfToolTotal * 100)} of tool total`,
+    group.truncatedCount > 0 ? `${group.truncatedCount} 截断` : null
+  ]
+    .filter(Boolean)
+    .join(" · ");
+
+  left.append(badge, title, subtitle);
+
+  const right = document.createElement("div");
+  right.className = "token-tool-summary-right";
+
+  const caret = document.createElement("span");
+  caret.className = "token-tool-caret";
+  caret.textContent = "+";
+  right.append(caret);
+
+  summary.append(left, right);
+  details.append(summary);
+
+  const body = document.createElement("div");
+  body.className = "token-tool-body";
+
+  const instances = document.createElement("div");
+  instances.className = "token-tool-instances";
+  group.instances.forEach((instance) => {
+    instances.append(renderToolInstance(instance, group.tokens, totalTokens));
+  });
+
+  body.append(instances);
+  details.append(body);
+  return details;
+}
+
+function renderTokenDistribution(tokenStats) {
+  if (!tokenStats || !Array.isArray(tokenStats.categories) || tokenStats.categories.length === 0) {
+    clearTokenDistribution();
+    return;
+  }
+
+  const categories = tokenStats.categories.filter((entry) => Number.isFinite(entry.tokens) && entry.tokens > 0);
+
+  if (categories.length === 0) {
+    clearTokenDistribution();
+    return;
+  }
+
+  const totalTokens = Number.isFinite(tokenStats.totalTokens) && tokenStats.totalTokens > 0
+    ? tokenStats.totalTokens
+    : categories.reduce((sum, entry) => sum + entry.tokens, 0);
+  const knownTokens = Number.isFinite(tokenStats.knownTokens)
+    ? tokenStats.knownTokens
+    : Math.max(0, totalTokens - (Number.isFinite(tokenStats.hiddenTokens) ? tokenStats.hiddenTokens : 0));
+  const hiddenTokens = Number.isFinite(tokenStats.hiddenTokens)
+    ? tokenStats.hiddenTokens
+    : Math.max(0, totalTokens - knownTokens);
+  const explicitTruncationCount = Number.isFinite(tokenStats.explicitTruncationCount)
+    ? tokenStats.explicitTruncationCount
+    : 0;
+  const unattributedStats = tokenStats.unattributedStats || {
+    totalCount: 0,
+    webSearchCount: 0,
+    truncatedCount: 0,
+    noVisibleDataCount: 0,
+    residualCount: 0
+  };
+  const toolStats = tokenStats.toolStats || { totalTokens: 0, totalCount: 0, groups: [], shareOfOverall: 0 };
+  const toolGroups = Array.isArray(toolStats.groups) ? toolStats.groups : [];
+  elements.transcriptTokenCard.hidden = false;
+  elements.transcriptTokenNote.textContent =
+    "按 token_count 段统计：可见文本按长度估算；剩余 token 统一记为未归因，次数标签可重叠。";
+  elements.transcriptTokenTotal.textContent = `${formatTokenCount(totalTokens)} tok`;
+  elements.transcriptTokenSummary.replaceChildren(
+    createTokenMetric("总量", `${formatTokenCount(totalTokens)} tok`, "按段 total_tokens 统计"),
+    createTokenMetric("已识别", `${formatTokenCount(knownTokens)} tok`, "能从日志直接看到的部分"),
+    createTokenMetric(
+      "未归因",
+      `${formatTokenCount(hiddenTokens)} tok`,
+      [
+        `${unattributedStats.totalCount} 段未归因（按 token_count）`,
+        `${unattributedStats.webSearchCount} 段含 web_search`,
+        `${unattributedStats.truncatedCount} 段明确截断`,
+        unattributedStats.noVisibleDataCount > 0 ? `${unattributedStats.noVisibleDataCount} 段无可见内容` : null,
+        `${unattributedStats.residualCount} 段其他残差`
+      ]
+        .filter(Boolean)
+        .join(" · ")
+    ),
+    createTokenMetric(
+      "Tool",
+      `${formatTokenCount(toolStats.totalTokens)} tok`,
+      `${formatTokenPercent(toolStats.shareOfOverall * 100)} of total · ${toolStats.totalCount} 次`
+    )
+  );
+  elements.transcriptTokenBar.replaceChildren();
+  elements.transcriptTokenLegend.replaceChildren();
+  elements.transcriptTokenToolsNote.textContent = toolGroups.length > 0
+    ? [
+        "每个 tool 只统计能从日志直接看到的输入/输出",
+        `未归因共 ${unattributedStats.totalCount} 段，不会硬分给某个 tool`,
+        "web_search 内部消耗和其他未落盘内容留在未归因里",
+        explicitTruncationCount > 0 ? `已明确标出 ${explicitTruncationCount} 处日志截断` : null
+      ]
+        .filter(Boolean)
+        .join("；")
+    : "当前会话没有可分组的 tool 调用。";
+  elements.transcriptTokenTools.replaceChildren();
+
+  for (const entry of categories) {
+    const percent = totalTokens > 0 ? (entry.tokens / totalTokens) * 100 : 0;
+    const displayLabel = entry.key === "hidden" ? "未归因" : entry.label;
+    const bar = document.createElement("div");
+    bar.className = "token-bar-segment";
+    bar.style.setProperty("--token-color", entry.color);
+    bar.style.flexBasis = `${percent}%`;
+    bar.title = `${displayLabel} · ${formatTokenCount(entry.tokens)} tok · ${formatTokenPercent(percent)} cost`;
+    elements.transcriptTokenBar.append(bar);
+
+    const legendItem = document.createElement("div");
+    legendItem.className = "token-legend-item";
+
+    const swatch = document.createElement("span");
+    swatch.className = "token-legend-swatch";
+    swatch.style.setProperty("--token-color", entry.color);
+
+    const body = document.createElement("div");
+    body.className = "token-legend-body";
+
+    const label = document.createElement("div");
+    label.className = "token-legend-label";
+    label.textContent = displayLabel;
+
+    const meta = document.createElement("div");
+    meta.className = "token-legend-meta";
+    meta.textContent = entry.key === "hidden"
+      ? `${formatTokenCount(entry.tokens)} tok · ${formatTokenPercent(percent)} cost · ${unattributedStats.totalCount} 段未归因`
+      : `${formatTokenCount(entry.tokens)} tok · ${formatTokenPercent(percent)} cost`;
+
+    body.append(label, meta);
+    legendItem.append(swatch, body);
+    elements.transcriptTokenLegend.append(legendItem);
+  }
+
+  toolGroups.forEach((group, index) => {
+    elements.transcriptTokenTools.append(renderToolGroup(group, totalTokens, index));
+  });
 }
 
 function truncateText(value, maxLength = 80) {
@@ -717,6 +1281,10 @@ function summarizeToolOutput(item) {
   return truncateText(extractFirstUsefulLine(item.body), 78) || "No output";
 }
 
+function getTruncationNote(item) {
+  return item?.isTruncated ? item.truncationReason || "日志截断" : "";
+}
+
 function isConversationUserMessage(item) {
   return item?.kind === "message" && item.role === "user" && item.isContextPrelude !== true;
 }
@@ -989,9 +1557,10 @@ function describeProcessEntries(entries) {
   return parts.join(" · ");
 }
 
-function buildProcessGroup(entries) {
+function buildProcessGroup(entries, range = null) {
   const details = document.createElement("details");
   details.className = "process-group";
+  applyItemRangeAttributes(details, range);
   details.innerHTML = `
     <summary>
       <div class="entry-summary">
@@ -1008,7 +1577,7 @@ function buildProcessGroup(entries) {
   body.className = "process-group-body";
 
   entries.forEach((entry) => {
-    body.append(buildTranscriptEntry(entry));
+    body.append(buildTranscriptEntry(entry, entry));
   });
 
   details.append(body);
@@ -1017,7 +1586,7 @@ function buildProcessGroup(entries) {
 
 function buildConversationBlock(block, session) {
   const blockItems = session.items.slice(block.startIndex, block.endIndex);
-  const entries = groupTranscriptItems(blockItems);
+  const entries = groupTranscriptItemsWithRanges(blockItems, block.startIndex);
   const visibleUserEntries = entries.filter(isUserMessageEntry);
   const assistantSelection = pickVisibleAssistantEntry(entries);
   const visibleEntries = new Set(visibleUserEntries);
@@ -1039,6 +1608,10 @@ function buildConversationBlock(block, session) {
   const wrapper = document.createElement("section");
   wrapper.className = "conversation-block";
   wrapper.dataset.blockState = assistantSelection?.state || (visibleUserCount > 0 ? "waiting" : "history");
+  applyItemRangeAttributes(wrapper, {
+    startIndex: block.startIndex,
+    endIndex: block.endIndex
+  });
   wrapper.innerHTML = `
     <header class="conversation-block-header">
       <div class="conversation-block-meta">
@@ -1068,7 +1641,7 @@ function buildConversationBlock(block, session) {
 
   if (visibleUserEntries.length === 0 && !assistantSelection) {
     entries.forEach((entry) => {
-      stack.append(buildTranscriptEntry(entry));
+      stack.append(buildTranscriptEntry(entry, entry));
     });
     wrapper.append(stack);
     return wrapper;
@@ -1076,7 +1649,7 @@ function buildConversationBlock(block, session) {
 
   displaySegments.forEach((segment) => {
     if (segment.kind === "visible") {
-      const node = buildTranscriptEntry(segment.entry);
+      const node = buildTranscriptEntry(segment.entry, segment.entry);
 
       if (assistantSelection?.entry === segment.entry && assistantSelection.state === "pending") {
         node.classList.add("pending-report");
@@ -1087,7 +1660,11 @@ function buildConversationBlock(block, session) {
     }
 
     if (segment.kind === "process") {
-      stack.append(buildProcessGroup(segment.entries));
+      const range = {
+        startIndex: segment.entries[0]?.startIndex ?? block.startIndex,
+        endIndex: segment.entries[segment.entries.length - 1]?.endIndex ?? block.endIndex
+      };
+      stack.append(buildProcessGroup(segment.entries, range));
     }
   });
 
@@ -1129,27 +1706,33 @@ function renderRichText(text, renderedHtml = "") {
   return htmlParts.length > 0 ? htmlParts.join("") : `<p>${escapeHtml(source)}</p>`;
 }
 
-function renderPreformattedBlock(label, value) {
+function renderPreformattedBlock(label, value, note = "") {
   return `
     <section class="tool-block">
-      <div class="tool-block-label">${escapeHtml(label)}</div>
+      <div class="tool-block-head">
+        <div class="tool-block-label">${escapeHtml(label)}</div>
+        ${note ? `<div class="tool-block-note">${escapeHtml(note)}</div>` : ""}
+      </div>
       <pre><code>${escapeHtml(String(value ?? "").trim() || "(empty)")}</code></pre>
     </section>
   `;
 }
 
-function buildTranscriptEntry(entry) {
+function buildTranscriptEntry(entry, range = null) {
   if (entry.kind === "tool_interaction") {
     const summaryParts = [summarizeToolCall(entry.call), summarizeToolOutput(entry.output)].filter(Boolean);
     const timestamp = entry.output.timestamp || entry.call.timestamp || "";
+    const truncationNote = getTruncationNote(entry.output) || getTruncationNote(entry.call);
     const wrapper = document.createElement("details");
     wrapper.className = "transcript-entry tool-entry";
+    applyItemRangeAttributes(wrapper, range);
 
     wrapper.innerHTML = `
       <summary>
         <div class="entry-summary">
           <span class="entry-badge tool">Tool</span>
           <span class="entry-title">${escapeHtml(entry.call.name || "tool")}</span>
+          ${truncationNote ? `<span class="entry-flag truncated">截断</span>` : ""}
           <span class="entry-preview">${escapeHtml(summaryParts.join("  |  "))}</span>
         </div>
         <div class="entry-meta">
@@ -1158,8 +1741,8 @@ function buildTranscriptEntry(entry) {
         </div>
       </summary>
       <div class="entry-content">
-        ${renderPreformattedBlock("Input", entry.call.body)}
-        ${renderPreformattedBlock("Output", entry.output.body)}
+        ${renderPreformattedBlock("Input", entry.call.body, getTruncationNote(entry.call))}
+        ${renderPreformattedBlock("Output", entry.output.body, getTruncationNote(entry.output))}
       </div>
     `;
 
@@ -1171,6 +1754,7 @@ function buildTranscriptEntry(entry) {
   if (item.kind === "message") {
     const article = document.createElement("article");
     article.className = `transcript-entry message-entry role-${item.role}`;
+    applyItemRangeAttributes(article, range);
     const jumpTargetKind = getTranscriptJumpTargetKind(item);
 
     if (jumpTargetKind) {
@@ -1194,6 +1778,7 @@ function buildTranscriptEntry(entry) {
   if (item.kind === "reasoning") {
     const details = document.createElement("details");
     details.className = "transcript-entry reasoning-entry";
+    applyItemRangeAttributes(details, range);
     details.innerHTML = `
       <summary>
         <div class="entry-summary">
@@ -1213,6 +1798,7 @@ function buildTranscriptEntry(entry) {
   if (item.kind === "tool_call" || item.kind === "tool_output" || item.kind === "tool_event") {
     const details = document.createElement("details");
     details.className = "transcript-entry tool-entry";
+    applyItemRangeAttributes(details, range);
     const badgeLabel = item.kind === "tool_output" ? "Tool Output" : item.kind === "tool_call" ? "Tool Call" : "Tool Event";
     const preview =
       item.kind === "tool_output"
@@ -1227,6 +1813,7 @@ function buildTranscriptEntry(entry) {
         <div class="entry-summary">
           <span class="entry-badge tool">${escapeHtml(badgeLabel)}</span>
           <span class="entry-title">${escapeHtml(title)}</span>
+          ${item.isTruncated ? `<span class="entry-flag truncated">截断</span>` : ""}
           <span class="entry-preview">${escapeHtml(preview || "")}</span>
         </div>
         <div class="entry-meta">
@@ -1235,7 +1822,7 @@ function buildTranscriptEntry(entry) {
         </div>
       </summary>
       <div class="entry-content">
-        ${renderPreformattedBlock("Body", item.body)}
+        ${renderPreformattedBlock("Body", item.body, getTruncationNote(item))}
       </div>
     `;
     return details;
@@ -1243,6 +1830,7 @@ function buildTranscriptEntry(entry) {
 
   const article = document.createElement("article");
   article.className = "transcript-entry";
+  applyItemRangeAttributes(article, range);
   article.innerHTML = `
     <header class="entry-header">
       <div class="entry-summary">
@@ -1263,6 +1851,8 @@ function renderTranscript(session) {
   if (!session) {
     elements.transcriptToolbar.hidden = true;
     elements.transcriptStats.textContent = "-";
+    clearTokenDistribution();
+    clearTokenRail();
     return;
   }
 
@@ -1274,31 +1864,38 @@ function renderTranscript(session) {
   const userMessageCount = session.items.filter(isConversationUserMessage).length;
   const reportCount = session.items.filter(isFinalAssistantMessage).length;
   const roundSelection = describeRoundSelection(session);
+  const totalTokenLabel = session.tokenStats?.totalTokens > 0 ? `${formatTokenCount(session.tokenStats.totalTokens)} tok` : null;
 
   for (const block of conversationBlocks) {
     elements.transcriptRoot.append(buildConversationBlock(block, session));
   }
 
   elements.transcriptToolbar.hidden = false;
+  renderTokenDistribution(session.tokenStats);
+  renderTokenRail(session.tokenSegments, session.tokenStats);
   elements.transcriptStats.textContent = [
     `${conversationBlocks.length} 轮`,
     `${userMessageCount} 条用户消息`,
     `${reportCount} 条总结`,
     toolCount > 0 ? `${toolCount} 次工具` : null,
+    totalTokenLabel,
     roundSelection
   ]
     .filter(Boolean)
     .join(" · ");
   bindTranscriptJumpTargets();
+  scheduleTokenRailSync({ rebuildAnchors: true });
 }
 
 function showEmptyState(message) {
   clearTranscriptJumpState();
+  clearTokenRail();
   elements.emptyState.querySelector("p").textContent = message;
   elements.viewerCard.classList.remove("has-selection");
   elements.transcriptRoot.replaceChildren();
   elements.transcriptToolbar.hidden = true;
   elements.transcriptStats.textContent = "-";
+  clearTokenDistribution();
 }
 
 function renderSelection() {
@@ -1670,7 +2267,6 @@ for (const button of elements.scopeButtons) {
 
 elements.sidebarToggle.addEventListener("click", () => {
   state.sidebarCollapsed = !state.sidebarCollapsed;
-  saveSidebarPreference();
   renderChromeState();
 });
 
@@ -1721,12 +2317,30 @@ elements.expandToolsButton.addEventListener("click", () => {
   elements.transcriptRoot.querySelectorAll(".process-group").forEach((node) => {
     node.open = true;
   });
+  scheduleTokenRailSync({ rebuildAnchors: true });
 });
 
 elements.collapseToolsButton.addEventListener("click", () => {
   elements.transcriptRoot.querySelectorAll(".process-group").forEach((node) => {
     node.open = false;
   });
+  scheduleTokenRailSync({ rebuildAnchors: true });
+});
+
+elements.chatPane.addEventListener("scroll", () => {
+  scheduleTokenRailSync();
+});
+
+elements.transcriptRoot.addEventListener(
+  "toggle",
+  () => {
+    scheduleTokenRailSync({ rebuildAnchors: true });
+  },
+  true
+);
+
+window.addEventListener("resize", () => {
+  scheduleTokenRailSync({ rebuildAnchors: true });
 });
 
 document.addEventListener("keydown", (event) => {
@@ -1750,7 +2364,6 @@ document.addEventListener("keydown", (event) => {
   }
 });
 
-state.sidebarCollapsed = loadSidebarPreference();
 renderChromeState();
 initializeRouteState();
 fetchSessions({

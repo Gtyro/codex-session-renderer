@@ -44,21 +44,6 @@ function activate(context) {
   );
 
   context.subscriptions.push(
-    vscode.commands.registerCommand("codexSessionRenderer.stopServer", async () => {
-      try {
-        const stopped = await stopServer();
-        if (stopped) {
-          vscode.window.showInformationMessage("Codex Session Browser stopped.");
-        } else {
-          vscode.window.showInformationMessage("Codex Session Browser is not running.");
-        }
-      } catch (error) {
-        vscode.window.showErrorMessage(error instanceof Error ? error.message : String(error));
-      }
-    })
-  );
-
-  context.subscriptions.push(
     vscode.commands.registerCommand("codexSessionRenderer.runSelfCheck", async () => {
       try {
         await runSelfCheck(vscode, context);

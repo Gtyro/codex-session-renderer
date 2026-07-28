@@ -29,6 +29,20 @@ function buildToolEvent(name) {
   };
 }
 
+function buildTokenSnapshot(tokens, items, options = {}) {
+  return {
+    tokens,
+    cumulativeTokens: options.cumulativeTokens ?? tokens,
+    inputTokens: options.inputTokens ?? tokens,
+    cachedInputTokens: options.cachedInputTokens ?? 0,
+    outputTokens: options.outputTokens ?? 0,
+    reasoningOutputTokens: options.reasoningOutputTokens ?? 0,
+    startIndex: options.startIndex ?? 0,
+    endIndex: options.endIndex ?? items.length,
+    items
+  };
+}
+
 test("selectRecentRounds keeps multiple user messages that belong to one final answer block", () => {
   const session = {
     id: "demo",
@@ -56,6 +70,42 @@ test("selectRecentRounds keeps multiple user messages that belong to one final a
   assert.deepEqual(
     previousRound.items.map((item) => item.text || item.name),
     ["需求 A", "先看一下", "exec_command", "补充需求 B", "最后总结", "下一轮需求", "下一轮总结"]
+  );
+});
+
+test("selectRecentRounds trims token snapshots together with the selected rounds", () => {
+  const firstUser = buildMessage("user", "需求 A");
+  const firstAssistant = buildMessage("assistant", "处理 1", { phase: "final_answer" });
+  const secondUser = buildMessage("user", "需求 B");
+  const secondAssistant = buildMessage("assistant", "处理 2", { phase: "final_answer" });
+  const session = {
+    id: "demo",
+    items: [firstUser, firstAssistant, secondUser, secondAssistant],
+    tokenSnapshots: [
+      buildTokenSnapshot(100, [firstUser, firstAssistant], {
+        cumulativeTokens: 100,
+        startIndex: 0,
+        endIndex: 2
+      }),
+      buildTokenSnapshot(60, [secondUser, secondAssistant], {
+        cumulativeTokens: 160,
+        startIndex: 2,
+        endIndex: 4
+      })
+    ]
+  };
+
+  const selected = selectRecentRounds(session, 1);
+
+  assert.deepEqual(
+    selected.items.map((item) => item.text),
+    ["需求 B", "处理 2"]
+  );
+  assert.equal(selected.tokenSnapshots.length, 1);
+  assert.equal(selected.tokenSnapshots[0].tokens, 60);
+  assert.deepEqual(
+    selected.tokenSnapshots[0].items.map((item) => item.text),
+    ["需求 B", "处理 2"]
   );
 });
 
@@ -128,6 +178,84 @@ test("loadSession keeps input_image blocks structured and avoids dumping base64 
       imageUrl: "data:image/png;base64,AAAA",
       detail: "high"
     });
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("loadSession records unique token snapshots from token_count events", async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "csr-session-parser-"));
+  const filePath = path.join(tempDir, "session.jsonl");
+
+  try {
+    await writeFile(
+      filePath,
+      `${[
+        JSON.stringify({
+          type: "response_item",
+          timestamp: "2026-06-23T00:00:00.000Z",
+          payload: {
+            type: "message",
+            role: "user",
+            content: [{ type: "input_text", text: "需求 A" }]
+          }
+        }),
+        JSON.stringify({
+          type: "response_item",
+          timestamp: "2026-06-23T00:00:01.000Z",
+          payload: {
+            type: "message",
+            role: "assistant",
+            content: [{ type: "output_text", text: "处理中" }]
+          }
+        }),
+        JSON.stringify({
+          timestamp: "2026-06-23T00:00:02.000Z",
+          type: "event_msg",
+          payload: {
+            type: "token_count",
+            info: {
+              total_token_usage: { total_tokens: 120 },
+              last_token_usage: {
+                total_tokens: 120,
+                input_tokens: 80,
+                cached_input_tokens: 0,
+                output_tokens: 40,
+                reasoning_output_tokens: 0
+              }
+            }
+          }
+        }),
+        JSON.stringify({
+          timestamp: "2026-06-23T00:00:03.000Z",
+          type: "event_msg",
+          payload: {
+            type: "token_count",
+            info: {
+              total_token_usage: { total_tokens: 120 },
+              last_token_usage: {
+                total_tokens: 120,
+                input_tokens: 80,
+                cached_input_tokens: 0,
+                output_tokens: 40,
+                reasoning_output_tokens: 0
+              }
+            }
+          }
+        })
+      ].join("\n")}\n`,
+      "utf8"
+    );
+
+    const session = await loadSession(filePath);
+
+    assert.equal(session.items.length, 2);
+    assert.equal(session.tokenSnapshots.length, 1);
+    assert.equal(session.tokenSnapshots[0].tokens, 120);
+    assert.deepEqual(
+      session.tokenSnapshots[0].items.map((item) => item.text),
+      ["需求 A", "处理中"]
+    );
   } finally {
     await rm(tempDir, { recursive: true, force: true });
   }
@@ -264,6 +392,57 @@ test("loadSession strips standalone <proposed_plan> marker lines inside assistan
     assert.equal(message.contentBlocks.length, 1);
     assert.equal(message.contentBlocks[0].kind, "text");
     assert.doesNotMatch(message.contentBlocks[0].text, /<\/?proposed_plan>/);
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("loadSession marks explicitly truncated tool output", async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "csr-session-parser-"));
+  const filePath = path.join(tempDir, "session.jsonl");
+
+  try {
+    await writeFile(
+      filePath,
+      [
+        JSON.stringify({
+          timestamp: "2026-06-23T00:00:00.000Z",
+          type: "response_item",
+          payload: {
+            type: "function_call",
+            call_id: "call-1",
+            name: "exec_command",
+            arguments: "{\"cmd\":\"rg foo\"}"
+          }
+        }),
+        JSON.stringify({
+          timestamp: "2026-06-23T00:00:01.000Z",
+          type: "response_item",
+          payload: {
+            type: "function_call_output",
+            call_id: "call-1",
+            output: [
+              "Chunk ID: demo",
+              "Wall time: 0.0001 seconds",
+              "Process exited with code 0",
+              "Original token count: 104049",
+              "Output:",
+              "Total output lines: 3034",
+              "",
+              "/tmp/demo"
+            ].join("\n")
+          }
+        })
+      ].join("\n") + "\n",
+      "utf8"
+    );
+
+    const session = await loadSession(filePath);
+    const toolOutput = session.items[1];
+
+    assert.equal(toolOutput.kind, "tool_output");
+    assert.equal(toolOutput.isTruncated, true);
+    assert.equal(toolOutput.truncationReason, "日志截断");
   } finally {
     await rm(tempDir, { recursive: true, force: true });
   }

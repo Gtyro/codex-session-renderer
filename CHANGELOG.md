@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Added deep-linked browser URLs that preserve the selected session, scope, search query, and reader options.
+- Grouped transcript activity into collapsible conversation rounds and added `[` / `]` jump navigation between user requests and final answers.
+- Aligned recent-round selection with `final_answer` boundaries so interrupted follow-up user messages stay inside the same round.
+- Improved markdown and HTML presentation for structured image attachments, attached-file callouts, and skill payloads.
 - Fixed VSIX packaging after an over-aggressive exclude removed `src/core/font-assets.js` from the extension runtime.
 - Changed CLI defaults so PNG export is now opt-in via `--png` or `--png-only`.
 - Deprecated `--only-images` in favor of `--png-only`.

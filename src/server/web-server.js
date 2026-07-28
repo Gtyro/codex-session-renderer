@@ -1,5 +1,6 @@
 import http from "node:http";
 import { execFile } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import os from "node:os";
 import { promisify } from "node:util";
@@ -29,6 +30,10 @@ import {
 } from "./static-asset-routing.js";
 
 const execFileAsync = promisify(execFile);
+const DEFAULT_WEB_PORT = 4311;
+const DEFAULT_BROWSER_CLIENT_HEARTBEAT_TIMEOUT_MS = 90_000;
+const DEFAULT_BROWSER_CLIENT_HEARTBEAT_INTERVAL_MS = 30_000;
+const DEFAULT_BROWSER_CLIENT_SHUTDOWN_DELAY_MS = 5_000;
 
 function isWslEnvironment() {
   return (
@@ -188,6 +193,144 @@ async function createWindowsHostPortInUseError(host, port) {
   return error;
 }
 
+function normalizePositiveNumber(value, fallbackValue) {
+  return Number.isFinite(value) && value >= 0 ? value : fallbackValue;
+}
+
+function createBrowserClientController(server, options = {}) {
+  const stopWhenIdle = Boolean(options.stopWhenIdle);
+  const heartbeatTimeoutMs = normalizePositiveNumber(
+    options.clientHeartbeatTimeoutMs,
+    DEFAULT_BROWSER_CLIENT_HEARTBEAT_TIMEOUT_MS
+  );
+  const heartbeatIntervalMs = Math.max(
+    1_000,
+    normalizePositiveNumber(
+      options.clientHeartbeatIntervalMs,
+      Math.min(
+        DEFAULT_BROWSER_CLIENT_HEARTBEAT_INTERVAL_MS,
+        Math.max(1_000, Math.floor(heartbeatTimeoutMs / 3))
+      )
+    )
+  );
+  const shutdownDelayMs = normalizePositiveNumber(
+    options.stopWhenIdleDelayMs,
+    DEFAULT_BROWSER_CLIENT_SHUTDOWN_DELAY_MS
+  );
+  const pruneIntervalMs = Math.max(1_000, Math.min(heartbeatIntervalMs, 15_000));
+  const clients = new Map();
+  let hasSeenClient = false;
+  let shutdownRequested = false;
+  let shutdownTimer = null;
+  const pruneTimer = setInterval(() => {
+    if (pruneStaleClients()) {
+      scheduleShutdownIfIdle();
+    }
+  }, pruneIntervalMs);
+
+  pruneTimer.unref?.();
+
+  function clearShutdownTimer() {
+    if (shutdownTimer) {
+      clearTimeout(shutdownTimer);
+      shutdownTimer = null;
+    }
+  }
+
+  function stopTimers() {
+    clearShutdownTimer();
+    clearInterval(pruneTimer);
+  }
+
+  function pruneStaleClients(now = Date.now()) {
+    let removed = false;
+
+    for (const [clientId, client] of clients.entries()) {
+      if (now - client.lastSeenAt > heartbeatTimeoutMs) {
+        clients.delete(clientId);
+        removed = true;
+      }
+    }
+
+    return removed;
+  }
+
+  function scheduleShutdownIfIdle() {
+    if (!stopWhenIdle || !hasSeenClient || clients.size > 0 || shutdownRequested || shutdownTimer) {
+      return;
+    }
+
+    shutdownTimer = setTimeout(() => {
+      shutdownTimer = null;
+      pruneStaleClients();
+
+      if (clients.size > 0 || shutdownRequested) {
+        return;
+      }
+
+      shutdownRequested = true;
+      stopTimers();
+      server.close(() => {});
+      server.closeIdleConnections?.();
+    }, shutdownDelayMs);
+
+    shutdownTimer.unref?.();
+  }
+
+  function markClientActive(clientId) {
+    const client = clients.get(clientId);
+
+    if (!client) {
+      return false;
+    }
+
+    client.lastSeenAt = Date.now();
+    clearShutdownTimer();
+    return true;
+  }
+
+  server.once("close", () => {
+    shutdownRequested = true;
+    stopTimers();
+    clients.clear();
+  });
+
+  return {
+    heartbeatIntervalMs,
+    heartbeatTimeoutMs,
+    registerClient() {
+      pruneStaleClients();
+      clearShutdownTimer();
+      hasSeenClient = true;
+
+      const clientId = randomUUID();
+      clients.set(clientId, {
+        lastSeenAt: Date.now()
+      });
+
+      return {
+        clientId,
+        heartbeatIntervalMs,
+        heartbeatTimeoutMs
+      };
+    },
+    pingClient(clientId) {
+      pruneStaleClients();
+      return markClientActive(clientId);
+    },
+    disconnectClient(clientId) {
+      pruneStaleClients();
+      const deleted = clients.delete(clientId);
+
+      if (deleted) {
+        scheduleShutdownIfIdle();
+      }
+
+      return deleted;
+    }
+  };
+}
+
 function sendResponse(response, statusCode, body, contentType) {
   response.writeHead(statusCode, {
     "content-type": contentType,
@@ -256,7 +399,35 @@ async function serveStaticAsset(response, pathname) {
   }
 }
 
-async function handleApiRequest(request, response, url, roots) {
+async function handleApiRequest(request, response, url, roots, browserClientController) {
+  if (request.method === "POST" && url.pathname === "/api/browser-client/open") {
+    sendJson(response, 200, browserClientController.registerClient());
+    return true;
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/browser-client/ping") {
+    const body = await readJsonBody(request);
+
+    if (!browserClientController.pingClient(body.clientId)) {
+      sendError(response, 410, "Browser client session expired.");
+      return true;
+    }
+
+    sendJson(response, 200, {
+      ok: true
+    });
+    return true;
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/browser-client/close") {
+    const body = await readJsonBody(request);
+    browserClientController.disconnectClient(body.clientId);
+    sendJson(response, 200, {
+      ok: true
+    });
+    return true;
+  }
+
   if (request.method === "GET" && url.pathname === "/api/sessions") {
     const items = await listSessions(roots);
     sendJson(response, 200, buildSessionListPayload(items, roots));
@@ -368,19 +539,8 @@ async function handleApiRequest(request, response, url, roots) {
   return false;
 }
 
-export async function startWebServer(options = {}) {
-  const roots = getSessionRoots(options);
-  const host = options.host || "127.0.0.1";
-  const port = Number.isFinite(options.port) ? options.port : 4311;
-
-  if (port !== 0 && (host === "127.0.0.1" || host === "localhost" || host === "0.0.0.0")) {
-    const windowsHostOccupant = await getWindowsHostPortOccupant(port);
-    if (windowsHostOccupant) {
-      throw await createWindowsHostPortInUseError(host, port);
-    }
-  }
-
-  const server = http.createServer(async (request, response) => {
+function createRequestHandler(host, port, roots, browserClientController) {
+  return async (request, response) => {
     if (!request.url) {
       sendError(response, 400, "Missing request URL.");
       return;
@@ -395,7 +555,7 @@ export async function startWebServer(options = {}) {
         return;
       }
 
-      if (await handleApiRequest(request, response, url, roots)) {
+      if (await handleApiRequest(request, response, url, roots, browserClientController)) {
         return;
       }
 
@@ -403,28 +563,76 @@ export async function startWebServer(options = {}) {
     } catch (error) {
       sendError(response, 500, error);
     }
-  });
+  };
+}
 
+async function listenOnPort(server, host, port) {
   await new Promise((resolve, reject) => {
-    server.once("error", async (error) => {
+    const handleError = (error) => {
+      reject(error);
+    };
+    const handleListening = () => {
+      server.off("error", handleError);
+      resolve();
+    };
+
+    server.once("error", handleError);
+    server.listen(port, host, handleListening);
+  });
+}
+
+export async function startWebServer(options = {}) {
+  const roots = getSessionRoots(options);
+  const host = options.host || "127.0.0.1";
+  const defaultPort = Number.isFinite(options.defaultPort) ? options.defaultPort : DEFAULT_WEB_PORT;
+  const hasExplicitPort = Number.isFinite(options.port);
+  const preferredPort = hasExplicitPort ? options.port : defaultPort;
+  const canFallbackToRandomPort = !hasExplicitPort && preferredPort !== 0;
+  const candidatePorts = canFallbackToRandomPort ? [preferredPort, 0] : [preferredPort];
+
+  for (const candidatePort of candidatePorts) {
+    if (candidatePort !== 0 && (host === "127.0.0.1" || host === "localhost" || host === "0.0.0.0")) {
+      const windowsHostOccupant = await getWindowsHostPortOccupant(candidatePort);
+      if (windowsHostOccupant) {
+        if (canFallbackToRandomPort && candidatePort === preferredPort) {
+          continue;
+        }
+
+        throw await createWindowsHostPortInUseError(host, candidatePort);
+      }
+    }
+
+    const server = http.createServer();
+    const browserClientController = createBrowserClientController(server, options);
+    server.on("request", createRequestHandler(host, candidatePort, roots, browserClientController));
+
+    try {
+      await listenOnPort(server, host, candidatePort);
+
+      const address = server.address();
+      const resolvedPort = typeof address === "object" && address ? address.port : candidatePort;
+
+      return {
+        server,
+        host,
+        port: resolvedPort,
+        preferredPort,
+        fallbackUsed: canFallbackToRandomPort && resolvedPort !== preferredPort,
+        roots,
+        url: `http://${host}:${resolvedPort}`
+      };
+    } catch (error) {
       if (error && error.code === "EADDRINUSE") {
-        reject(await createPortInUseError(host, port));
-        return;
+        if (canFallbackToRandomPort && candidatePort === preferredPort) {
+          continue;
+        }
+
+        throw await createPortInUseError(host, candidatePort);
       }
 
-      reject(error);
-    });
-    server.listen(port, host, resolve);
-  });
+      throw error;
+    }
+  }
 
-  const address = server.address();
-  const resolvedPort = typeof address === "object" && address ? address.port : port;
-
-  return {
-    server,
-    host,
-    port: resolvedPort,
-    roots,
-    url: `http://${host}:${resolvedPort}`
-  };
+  throw await createPortInUseError(host, preferredPort);
 }
