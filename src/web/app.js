@@ -22,6 +22,7 @@ import {
   resolveSessionSelectionAfterRefresh,
   sessionKey
 } from "./session-selection.js";
+import { deriveTaskActivity } from "./task-activity-presentation.js";
 
 const SCOPE_META = {
   all: {
@@ -106,6 +107,12 @@ const elements = {
   viewerCard: document.querySelector(".viewer-card"),
   emptyState: document.querySelector("#empty-state"),
   transcriptToolbar: document.querySelector("#transcript-toolbar"),
+  taskActivityCard: document.querySelector("#task-activity-card"),
+  taskActivityNote: document.querySelector("#task-activity-note"),
+  taskActivityState: document.querySelector("#task-activity-state"),
+  taskActivitySummary: document.querySelector("#task-activity-summary"),
+  taskRelationship: document.querySelector("#task-relationship"),
+  taskTimeline: document.querySelector("#task-timeline"),
   transcriptTokenCard: document.querySelector("#transcript-token-card"),
   transcriptTokenNote: document.querySelector("#transcript-token-note"),
   transcriptTokenTotal: document.querySelector("#transcript-token-total"),
@@ -447,6 +454,279 @@ function clearTokenRail() {
   elements.transcriptTokenRailCurrent.textContent = "-";
   elements.transcriptTokenRailTrack.replaceChildren();
   elements.transcriptTokenRailTrack.style.height = "";
+}
+
+function clearTaskActivity() {
+  elements.taskActivityCard.hidden = true;
+  elements.taskActivityCard.dataset.state = "";
+  elements.taskActivityNote.textContent = "-";
+  elements.taskActivityState.textContent = "-";
+  elements.taskActivitySummary.replaceChildren();
+  elements.taskRelationship.replaceChildren();
+  elements.taskTimeline.replaceChildren();
+}
+
+function getTaskActivityState(activity) {
+  if (activity.summary.failed > 0) {
+    return { label: "需复核", value: "attention" };
+  }
+
+  if (activity.timeline.some((event) => event.kind === "completed")) {
+    return { label: "已完成", value: "complete" };
+  }
+
+  if (activity.summary.passed > 0) {
+    return { label: "已验证", value: "verified" };
+  }
+
+  return { label: "进行中", value: "active" };
+}
+
+function getTaskStatusLabel(status) {
+  switch (status) {
+    case "completed":
+      return "完成";
+    case "blocked":
+      return "阻塞";
+    case "delegated":
+      return "已委派";
+    case "failed":
+      return "失败";
+    case "passed":
+      return "通过";
+    case "recorded":
+      return "已记录";
+    case "pending":
+      return "待结果";
+    default:
+      return "已识别";
+  }
+}
+
+function createTaskActivityMetric(label, value, tone = "neutral") {
+  const item = document.createElement("div");
+  item.className = `task-activity-metric ${tone}`;
+
+  const metricLabel = document.createElement("span");
+  metricLabel.textContent = label;
+  const metricValue = document.createElement("strong");
+  metricValue.textContent = value;
+  item.append(metricLabel, metricValue);
+  return item;
+}
+
+function createTaskActivityNode(type, label, options = {}) {
+  const itemIndex = Number.isInteger(options.itemIndex) ? options.itemIndex : null;
+  const node = document.createElement(itemIndex === null ? "div" : "button");
+  node.className = `task-relation-node ${type}`;
+  node.dataset.status = options.status || "observed";
+
+  if (itemIndex !== null) {
+    node.type = "button";
+    node.dataset.taskActivityIndex = String(itemIndex);
+    node.title = "跳转到原始 transcript";
+  }
+
+  const badge = document.createElement("span");
+  badge.className = "task-relation-badge";
+  badge.textContent = options.badge || "记录";
+  const title = document.createElement("strong");
+  title.textContent = label;
+  const meta = document.createElement("span");
+  meta.className = "task-relation-meta";
+  meta.textContent = options.meta || getTaskStatusLabel(options.status);
+  node.append(badge, title, meta);
+  return node;
+}
+
+function renderTaskRelationship(activity) {
+  elements.taskRelationship.replaceChildren();
+
+  if (activity.goals.length === 0) {
+    const empty = document.createElement("p");
+    empty.className = "task-relationship-empty";
+    empty.textContent = "尚未从当前会话识别到 Goal；下方仍保留全部可审计事件。";
+    elements.taskRelationship.append(empty);
+    return;
+  }
+
+  for (const goal of activity.goals) {
+    const branch = document.createElement("section");
+    branch.className = "task-relation-branch";
+    const root = createTaskActivityNode("goal", goal.label, {
+      badge: "Goal",
+      status: goal.status,
+      itemIndex: goal.itemIndex,
+      meta: `${getTaskStatusLabel(goal.status)} · ${goal.source === "create_goal" ? "显式" : "用户请求"}`
+    });
+    const children = document.createElement("div");
+    children.className = "task-relation-children";
+    const childTasks = activity.tasks.filter(
+      (task) => task.goalId === goal.id || (activity.goals.length === 1 && !task.goalId)
+    );
+    const directVerifications = activity.verifications.filter(
+      (verification) =>
+        (verification.goalId === goal.id || (activity.goals.length === 1 && !verification.goalId)) &&
+        !childTasks.some((task) => task.id === verification.taskId)
+    );
+
+    for (const task of childTasks) {
+      const taskWrap = document.createElement("div");
+      taskWrap.className = "task-relation-task";
+      taskWrap.append(
+        createTaskActivityNode("subtask", task.label, {
+          badge: "子任务",
+          status: task.status,
+          itemIndex: task.itemIndex,
+          meta: getTaskStatusLabel(task.status)
+        })
+      );
+
+      const checks = activity.verifications.filter((verification) => verification.taskId === task.id);
+      if (checks.length > 0) {
+        const evidence = document.createElement("div");
+        evidence.className = "task-relation-evidence";
+        checks.forEach((verification) => {
+          evidence.append(
+            createTaskActivityNode("verification", verification.command, {
+              badge: "验证",
+              status: verification.status,
+              itemIndex: verification.itemIndex,
+              meta: getTaskStatusLabel(verification.status)
+            })
+          );
+        });
+        taskWrap.append(evidence);
+      }
+
+      children.append(taskWrap);
+    }
+
+    directVerifications.forEach((verification) => {
+      children.append(
+        createTaskActivityNode("verification", verification.command, {
+          badge: "验证",
+          status: verification.status,
+          itemIndex: verification.itemIndex,
+          meta: getTaskStatusLabel(verification.status)
+        })
+      );
+    });
+
+    if (children.childElementCount === 0) {
+      const pending = document.createElement("p");
+      pending.className = "task-relation-pending";
+      pending.textContent = "尚未记录到委派或验证步骤";
+      children.append(pending);
+    }
+
+    branch.append(root, children);
+    elements.taskRelationship.append(branch);
+  }
+}
+
+function renderTaskTimeline(activity) {
+  elements.taskTimeline.replaceChildren();
+
+  for (const event of activity.timeline) {
+    const row = document.createElement("li");
+    row.className = "task-timeline-event";
+    row.dataset.kind = event.kind;
+    const content = document.createElement(Number.isInteger(event.itemIndex) ? "button" : "div");
+    content.className = "task-timeline-event-content";
+
+    if (Number.isInteger(event.itemIndex)) {
+      content.type = "button";
+      content.dataset.taskActivityIndex = String(event.itemIndex);
+      content.title = "跳转到原始 transcript";
+    }
+
+    const marker = document.createElement("span");
+    marker.className = "task-timeline-marker";
+    const title = document.createElement("strong");
+    title.textContent = event.title;
+    const detail = document.createElement("span");
+    detail.className = "task-timeline-detail";
+    detail.textContent = event.detail;
+    const time = document.createElement("time");
+    time.textContent = event.timestamp ? formatLocalTime(event.timestamp) : "日志中未提供时间";
+    content.append(marker, title, detail, time);
+    row.append(content);
+    elements.taskTimeline.append(row);
+  }
+}
+
+function renderTaskActivity(session) {
+  const activity = deriveTaskActivity(session);
+
+  if (!activity.hasActivity) {
+    clearTaskActivity();
+    return;
+  }
+
+  const stateInfo = getTaskActivityState(activity);
+  elements.taskActivityCard.hidden = false;
+  elements.taskActivityCard.dataset.state = stateInfo.value;
+  elements.taskActivityState.textContent = stateInfo.label;
+  elements.taskActivityNote.textContent = [
+    `${activity.summary.starts} 个 task_started`,
+    `${activity.summary.tools} 次工具调用`,
+    activity.summary.delegated > 0 ? `${activity.summary.delegated} 项委派` : null,
+    activity.summary.recorded > 0
+      ? `${activity.summary.passed} 通过 / ${activity.summary.failed} 失败 / ${activity.summary.recorded} 项验证`
+      : "尚未识别到验证命令"
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  elements.taskActivitySummary.replaceChildren(
+    createTaskActivityMetric("任务启动", String(activity.summary.starts), "started"),
+    createTaskActivityMetric("工具调用", String(activity.summary.tools), "tool"),
+    createTaskActivityMetric("已委派", String(activity.summary.delegated), "delegation"),
+    createTaskActivityMetric(
+      "验证结果",
+      activity.summary.recorded > 0 ? `${activity.summary.passed}/${activity.summary.failed}` : "—",
+      activity.summary.failed > 0 ? "failed" : "verification"
+    )
+  );
+  renderTaskRelationship(activity);
+  renderTaskTimeline(activity);
+}
+
+function jumpToTranscriptItem(itemIndex) {
+  const candidates = Array.from(
+    elements.transcriptRoot.querySelectorAll("[data-item-start-index][data-item-end-index]")
+  )
+    .filter((element) => {
+      const start = Number(element.dataset.itemStartIndex);
+      const end = Number(element.dataset.itemEndIndex);
+      return Number.isFinite(start) && Number.isFinite(end) && start <= itemIndex && itemIndex < end;
+    })
+    .sort((left, right) => {
+      const leftSize = Number(left.dataset.itemEndIndex) - Number(left.dataset.itemStartIndex);
+      const rightSize = Number(right.dataset.itemEndIndex) - Number(right.dataset.itemStartIndex);
+      return leftSize - rightSize;
+    });
+  const target = candidates[0];
+
+  if (!target) {
+    return;
+  }
+
+  if (target instanceof HTMLDetailsElement) {
+    target.open = true;
+  }
+
+  let ancestor = target.parentElement;
+  while (ancestor && ancestor !== elements.transcriptRoot) {
+    if (ancestor instanceof HTMLDetailsElement) {
+      ancestor.open = true;
+    }
+    ancestor = ancestor.parentElement;
+  }
+
+  target.classList.add("task-evidence-active");
+  target.scrollIntoView({ behavior: "smooth", block: "center" });
+  window.setTimeout(() => target.classList.remove("task-evidence-active"), 1800);
 }
 
 function formatTokenRailSegmentLabel(segment, totalTokens) {
@@ -1851,6 +2131,7 @@ function renderTranscript(session) {
   if (!session) {
     elements.transcriptToolbar.hidden = true;
     elements.transcriptStats.textContent = "-";
+    clearTaskActivity();
     clearTokenDistribution();
     clearTokenRail();
     return;
@@ -1871,6 +2152,7 @@ function renderTranscript(session) {
   }
 
   elements.transcriptToolbar.hidden = false;
+  renderTaskActivity(session);
   renderTokenDistribution(session.tokenStats);
   renderTokenRail(session.tokenSegments, session.tokenStats);
   elements.transcriptStats.textContent = [
@@ -1895,6 +2177,7 @@ function showEmptyState(message) {
   elements.transcriptRoot.replaceChildren();
   elements.transcriptToolbar.hidden = true;
   elements.transcriptStats.textContent = "-";
+  clearTaskActivity();
   clearTokenDistribution();
 }
 
@@ -2325,6 +2608,19 @@ elements.collapseToolsButton.addEventListener("click", () => {
     node.open = false;
   });
   scheduleTokenRailSync({ rebuildAnchors: true });
+});
+
+elements.taskActivityCard.addEventListener("click", (event) => {
+  const target = event.target.closest("[data-task-activity-index]");
+
+  if (!(target instanceof HTMLElement)) {
+    return;
+  }
+
+  const itemIndex = Number(target.dataset.taskActivityIndex);
+  if (Number.isInteger(itemIndex)) {
+    jumpToTranscriptItem(itemIndex);
+  }
 });
 
 elements.chatPane.addEventListener("scroll", () => {

@@ -261,6 +261,67 @@ test("loadSession records unique token snapshots from token_count events", async
   }
 });
 
+test("loadSession preserves task lifecycle events for the task activity view", async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "csr-session-parser-"));
+  const filePath = path.join(tempDir, "session.jsonl");
+
+  try {
+    await writeFile(
+      filePath,
+      `${[
+        JSON.stringify({
+          type: "event_msg",
+          timestamp: "2026-08-01T02:00:00.000Z",
+          payload: {
+            type: "task_started",
+            turn_id: "turn-1",
+            started_at: 1785559200,
+            collaboration_mode_kind: "default"
+          }
+        }),
+        JSON.stringify({
+          type: "event_msg",
+          timestamp: "2026-08-01T02:01:00.000Z",
+          payload: {
+            type: "task_complete",
+            turn_id: "turn-1",
+            completed_at: 1785559260,
+            duration_ms: 60000
+          }
+        })
+      ].join("\n")}\n`,
+      "utf8"
+    );
+
+    const session = await loadSession(filePath);
+
+    assert.deepEqual(session.activityEvents, [
+      {
+        type: "task_started",
+        timestamp: "2026-08-01T02:00:00.000Z",
+        turnId: "turn-1",
+        startedAt: 1785559200,
+        completedAt: null,
+        durationMs: null,
+        collaborationMode: "default",
+        modelContextWindow: null
+      },
+      {
+        type: "task_complete",
+        timestamp: "2026-08-01T02:01:00.000Z",
+        turnId: "turn-1",
+        startedAt: null,
+        completedAt: 1785559260,
+        durationMs: 60000,
+        collaborationMode: null,
+        modelContextWindow: null
+      }
+    ]);
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("loadSession strips wrapper <image> markers around structured image blocks", async () => {
   const tempDir = await mkdtemp(path.join(os.tmpdir(), "csr-session-parser-"));
   const filePath = path.join(tempDir, "session.jsonl");

@@ -345,6 +345,21 @@ function buildToolOutput(payload, timestamp, toolName) {
   };
 }
 
+function buildActivityEvent(payload, timestamp) {
+  return {
+    type: payload.type || "unknown_event",
+    timestamp: timestamp || null,
+    turnId: payload.turn_id || null,
+    startedAt: Number.isFinite(Number(payload.started_at)) ? Number(payload.started_at) : null,
+    completedAt: Number.isFinite(Number(payload.completed_at)) ? Number(payload.completed_at) : null,
+    durationMs: Number.isFinite(Number(payload.duration_ms)) ? Number(payload.duration_ms) : null,
+    collaborationMode: payload.collaboration_mode_kind || null,
+    modelContextWindow: Number.isFinite(Number(payload.model_context_window))
+      ? Number(payload.model_context_window)
+      : null
+  };
+}
+
 export async function loadSession(filePath, options = {}) {
   const source = await readFile(filePath, "utf8");
   const lines = parseJsonLines(source);
@@ -361,7 +376,8 @@ export async function loadSession(filePath, options = {}) {
     cliVersion: meta.cli_version || null,
     modelProvider: meta.model_provider || null,
     items: [],
-    tokenSnapshots: []
+    tokenSnapshots: [],
+    activityEvents: []
   };
   const toolNamesByCallId = new Map();
   let pendingTokenSnapshotStartIndex = 0;
@@ -416,6 +432,15 @@ export async function loadSession(filePath, options = {}) {
       if (payload.type === "task_started" || payload.type === "thread_rolled_back") {
         runEpoch += 1;
         resetTokenSnapshotWindow();
+      }
+
+      if (
+        payload.type === "task_started" ||
+        payload.type === "task_complete" ||
+        payload.type === "task_completed" ||
+        payload.type === "thread_rolled_back"
+      ) {
+        session.activityEvents.push(buildActivityEvent(payload, entry.timestamp || null));
       }
 
       if (payload.type === "token_count") {
@@ -550,6 +575,33 @@ function sliceTokenSnapshots(tokenSnapshots, startIndex) {
   return slicedSnapshots;
 }
 
+function sliceActivityEvents(activityEvents, startTimestamp) {
+  const sourceEvents = Array.isArray(activityEvents) ? activityEvents : [];
+  const startTime = Date.parse(startTimestamp || "");
+
+  if (!Number.isFinite(startTime)) {
+    return [...sourceEvents];
+  }
+
+  const visibleEvents = [];
+  let precedingStart = null;
+
+  for (const event of sourceEvents) {
+    const eventTime = Date.parse(event?.timestamp || "");
+
+    if (Number.isFinite(eventTime) && eventTime < startTime) {
+      if (event?.type === "task_started") {
+        precedingStart = event;
+      }
+      continue;
+    }
+
+    visibleEvents.push(event);
+  }
+
+  return precedingStart ? [precedingStart, ...visibleEvents] : visibleEvents;
+}
+
 export function selectRecentRounds(session, rounds) {
   const conversationRounds = splitConversationRounds(session.items);
   const totalRounds = conversationRounds.length;
@@ -579,11 +631,13 @@ export function selectRecentRounds(session, rounds) {
   const selectedRounds = conversationRounds.slice(totalRounds - rounds);
   const startIndex = selectedRounds[0].startIndex;
   const tokenSnapshots = sliceTokenSnapshots(session.tokenSnapshots, startIndex);
+  const activityEvents = sliceActivityEvents(session.activityEvents, session.items[startIndex]?.timestamp);
 
   return {
     ...session,
     items: session.items.slice(startIndex),
     tokenSnapshots,
+    activityEvents,
     selection: {
       mode: "recent_rounds",
       roundsRequested: rounds,

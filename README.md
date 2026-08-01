@@ -12,6 +12,7 @@ It reads session files from `~/.codex/sessions` and `~/.codex/archived_sessions`
 - Rename titles inline, archive or restore sessions, and permanently delete archived sessions.
 - Keep deep-linked URLs that preserve scope, search, selected session, and reader options.
 - Group transcript activity into conversation rounds, collapse process-heavy sections, and jump with `[` / `]`.
+- Connect Goals, delegated subtasks, `task_started` lifecycle events, tool calls, and detected verification results; linked evidence jumps back to the original transcript.
 - Render structured image attachments, attached-file callouts, and skill payloads as readable cards instead of raw protocol text.
 - Export the current view as compact/full Markdown, HTML, and optional PNG.
 
