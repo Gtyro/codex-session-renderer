@@ -3,6 +3,7 @@ import { copyFile, mkdir, open, readFile, readdir, rm, rename, rmdir, stat, writ
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
+import { parseIdeContextMessagePresentation, parseUserMessagePresentation } from "../shared/message-presentation.js";
 
 const SESSION_ID_PATTERN = /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i;
 const ANSI_PATTERN = /[\u001b\u009b][[\]()#;?]*(?:(?:\d{1,4}(?:;\d{0,4})*)?[0-9A-ORZcf-nqry=><~]|.)/gu;
@@ -10,8 +11,11 @@ const STANDALONE_PING_PATTERN = /^ping(?:[\s.!?。！？]*)$/iu;
 const SESSION_INDEX_FILE_NAME = "session_index.jsonl";
 const STATE_DATABASE_FILE_PATTERN = /^state_(\d+)\.sqlite$/u;
 const PING_DETECTION_HEADER_BYTES = 16 * 1024;
+const INTERNAL_APPROVAL_RETENTION_MS = 14 * 24 * 60 * 60 * 1000;
+const SESSION_METADATA_HEADER_BYTES = 4 * 1024;
 const SQLITE_MAX_BUFFER_BYTES = 16 * 1024 * 1024;
 const pingSessionCache = new Map();
+const sessionMetadataCache = new Map();
 const execFile = promisify(execFileCallback);
 
 export const SESSION_LOCATIONS = {
@@ -84,6 +88,19 @@ function normalizeText(value) {
     .trim();
 }
 
+function normalizeWorkspace(value) {
+  const workspace = String(value ?? "").trim();
+
+  if (!workspace) {
+    return null;
+  }
+
+  // Codex records an absolute cwd, but avoid using the host platform's path
+  // rules here: old sessions can originate from another OS or a remote host.
+  const withoutTrailingSeparator = workspace.replace(/[\\/]+$/u, "");
+  return withoutTrailingSeparator || workspace;
+}
+
 function looksLikeContextPrelude(text) {
   return (
     text.includes("# AGENTS.md instructions") ||
@@ -138,6 +155,21 @@ function getSessionIndexPath(codexDir) {
 function readThreadName(value) {
   const normalized = typeof value === "string" ? value.trim() : "";
   return normalized || null;
+}
+
+function getThreadDisplayName(value) {
+  const threadName = readThreadName(value);
+
+  if (!threadName) {
+    return null;
+  }
+
+  const requestText =
+    parseIdeContextMessagePresentation(threadName)?.requestText ||
+    parseUserMessagePresentation(threadName)?.requestText ||
+    null;
+
+  return requestText ? requestText.replace(/\s+/gu, " ").trim() : threadName;
 }
 
 function escapeSqliteValue(value) {
@@ -634,6 +666,122 @@ async function readUtf8FileHead(filePath, maxBytes) {
   }
 }
 
+function getSessionMetadata(payload) {
+  const startedAtMs = Date.parse(payload?.timestamp || "");
+
+  return {
+    workspace: normalizeWorkspace(payload?.cwd),
+    startedAtMs: Number.isFinite(startedAtMs) ? startedAtMs : null,
+    isGuardianReview: payload?.source?.subagent?.other === "guardian"
+  };
+}
+
+function readJsonStringProperty(source, propertyName) {
+  const expression = new RegExp(`"${propertyName}"\\s*:\\s*("(?:\\\\.|[^"\\\\])*")`, "u");
+  const match = expression.exec(source);
+
+  if (!match) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(match[1]);
+  } catch {
+    return null;
+  }
+}
+
+function readTruncatedSessionMetadata(source) {
+  if (
+    !/^\s*\{/u.test(source) ||
+    !/"type"\s*:\s*"session_meta"/u.test(source) ||
+    !/"payload"\s*:\s*\{/u.test(source)
+  ) {
+    return null;
+  }
+
+  const startedAtMs = Date.parse(readJsonStringProperty(source, "timestamp") || "");
+
+  return {
+    workspace: normalizeWorkspace(readJsonStringProperty(source, "cwd")),
+    startedAtMs: Number.isFinite(startedAtMs) ? startedAtMs : null,
+    isGuardianReview:
+      /"source"\s*:\s*\{\s*"subagent"\s*:\s*\{\s*"other"\s*:\s*"guardian"\s*\}\s*\}/u.test(
+        source
+      )
+  };
+}
+
+async function readSessionMetadata(filePath, fileStat = null) {
+  const cached = sessionMetadataCache.get(filePath);
+
+  if (cached && fileStat && cached.modifiedMs === fileStat.mtimeMs && cached.sizeBytes === fileStat.size) {
+    return cached.metadata;
+  }
+
+  let bytesRead;
+  let source;
+
+  try {
+    ({ bytesRead, source } = await readUtf8FileHead(filePath, SESSION_METADATA_HEADER_BYTES));
+  } catch (error) {
+    if (error && error.code === "ENOENT") {
+      sessionMetadataCache.delete(filePath);
+      return null;
+    }
+
+    throw error;
+  }
+
+  let metadata = getSessionMetadata(null);
+
+  const reachedEnd = !fileStat || bytesRead >= fileStat.size;
+  const rawLines = source.split(/\r?\n/u);
+  const lines =
+    !reachedEnd && !source.endsWith("\n") && !source.endsWith("\r") ? rawLines.slice(0, -1) : rawLines;
+
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+
+    if (!line) {
+      continue;
+    }
+
+    let entry;
+
+    try {
+      entry = JSON.parse(line);
+    } catch {
+      break;
+    }
+
+    if (entry?.type !== "session_meta") {
+      break;
+    }
+
+    metadata = getSessionMetadata(entry.payload);
+    break;
+  }
+
+  if (!metadata.isGuardianReview && lines.length !== rawLines.length) {
+    metadata = readTruncatedSessionMetadata(rawLines.at(-1).trim()) || metadata;
+  }
+
+  if (fileStat) {
+    sessionMetadataCache.set(filePath, {
+      modifiedMs: fileStat.mtimeMs,
+      sizeBytes: fileStat.size,
+      metadata
+    });
+  }
+
+  return metadata;
+}
+
+async function readSessionWorkspace(filePath, fileStat = null) {
+  return (await readSessionMetadata(filePath, fileStat))?.workspace || null;
+}
+
 async function isStandalonePingSessionFile(filePath, fileStat) {
   const cached = pingSessionCache.get(filePath);
 
@@ -696,6 +844,7 @@ async function isStandalonePingSessionFile(filePath, fileStat) {
   } catch (error) {
     if (error && error.code === "ENOENT") {
       pingSessionCache.delete(filePath);
+      sessionMetadataCache.delete(filePath);
       return false;
     }
 
@@ -709,6 +858,23 @@ async function isStandalonePingSessionFile(filePath, fileStat) {
   });
 
   return isStandalonePing;
+}
+
+async function readInternalApprovalSessionInfo(filePath, fileStat) {
+  const metadata = await readSessionMetadata(filePath, fileStat);
+
+  return metadata?.isGuardianReview
+    ? {
+        startedAtMs: metadata.startedAtMs
+      }
+    : null;
+}
+
+function isExpiredInternalApprovalSession(info, now = Date.now()) {
+  return (
+    Number.isFinite(info?.startedAtMs) &&
+    now - info.startedAtMs >= INTERNAL_APPROVAL_RETENTION_MS
+  );
 }
 
 async function removeEmptyParents(startDir, stopDir) {
@@ -736,9 +902,10 @@ async function removeEmptyParents(startDir, stopDir) {
   }
 }
 
-async function deleteStandalonePingSession(filePath, rootDir) {
+async function deleteTransientSessionFile(filePath, rootDir) {
   await rm(filePath, { force: true });
   pingSessionCache.delete(filePath);
+  sessionMetadataCache.delete(filePath);
   await removeEmptyParents(path.dirname(filePath), rootDir);
 }
 
@@ -765,6 +932,7 @@ async function readSessionRecordIfRetained(filePath, rootDir, location, threadNa
   } catch (error) {
     if (error && error.code === "ENOENT") {
       pingSessionCache.delete(filePath);
+      sessionMetadataCache.delete(filePath);
       return null;
     }
 
@@ -775,18 +943,32 @@ async function readSessionRecordIfRetained(filePath, rootDir, location, threadNa
     normalizedLocation === SESSION_LOCATIONS.sessions &&
     (await isStandalonePingSessionFile(filePath, fileStat))
   ) {
-    await deleteStandalonePingSession(filePath, rootDir);
+    await deleteTransientSessionFile(filePath, rootDir);
+    return null;
+  }
+
+  const internalApprovalInfo = await readInternalApprovalSessionInfo(filePath, fileStat);
+
+  if (internalApprovalInfo) {
+    if (isExpiredInternalApprovalSession(internalApprovalInfo)) {
+      await deleteTransientSessionFile(filePath, rootDir);
+    }
+
     return null;
   }
 
   const id = sessionIdFromPath(filePath);
+
+  const threadName = threadNamesById.get(id) ?? null;
 
   return {
     id,
     filePath,
     relativePath: toRelativeSessionPath(rootDir, filePath),
     location: normalizedLocation,
-    threadName: threadNamesById.get(id) ?? null,
+    threadName,
+    displayName: getThreadDisplayName(threadName),
+    workspace: await readSessionWorkspace(filePath, fileStat),
     modifiedAt: new Date(fileStat.mtimeMs).toISOString(),
     modifiedMs: fileStat.mtimeMs,
     sizeBytes: fileStat.size
@@ -797,10 +979,6 @@ async function filterRetainedSessionFiles(filePaths, rootDir, location) {
   const normalizedLocation = normalizeLocation(location);
   const retained = await Promise.all(
     filePaths.map(async (filePath) => {
-      if (normalizedLocation !== SESSION_LOCATIONS.sessions) {
-        return filePath;
-      }
-
       let fileStat;
 
       try {
@@ -808,14 +986,28 @@ async function filterRetainedSessionFiles(filePaths, rootDir, location) {
       } catch (error) {
         if (error && error.code === "ENOENT") {
           pingSessionCache.delete(filePath);
+          sessionMetadataCache.delete(filePath);
           return null;
         }
 
         throw error;
       }
 
-      if (await isStandalonePingSessionFile(filePath, fileStat)) {
-        await deleteStandalonePingSession(filePath, rootDir);
+      if (
+        normalizedLocation === SESSION_LOCATIONS.sessions &&
+        (await isStandalonePingSessionFile(filePath, fileStat))
+      ) {
+        await deleteTransientSessionFile(filePath, rootDir);
+        return null;
+      }
+
+      const internalApprovalInfo = await readInternalApprovalSessionInfo(filePath, fileStat);
+
+      if (internalApprovalInfo) {
+        if (isExpiredInternalApprovalSession(internalApprovalInfo)) {
+          await deleteTransientSessionFile(filePath, rootDir);
+        }
+
         return null;
       }
 
@@ -869,6 +1061,8 @@ async function mutateSessionLocation({
   }
 
   await moveSessionFile(sourcePath, targetPath);
+  pingSessionCache.delete(sourcePath);
+  sessionMetadataCache.delete(sourcePath);
 
   try {
     await writeStateThreadLocation(
@@ -884,6 +1078,8 @@ async function mutateSessionLocation({
   } catch (error) {
     try {
       await moveSessionFile(targetPath, sourcePath);
+      pingSessionCache.delete(targetPath);
+      sessionMetadataCache.delete(targetPath);
       await removeEmptyParents(path.dirname(targetPath), targetRoot);
     } catch {
       // Best effort rollback. Prefer surfacing the original DB sync failure.
@@ -1108,5 +1304,6 @@ export async function deleteSession({ location, relativePath, ...options }) {
 
   await rm(targetPath, { force: true });
   pingSessionCache.delete(targetPath);
+  sessionMetadataCache.delete(targetPath);
   await removeEmptyParents(path.dirname(targetPath), rootDir);
 }
