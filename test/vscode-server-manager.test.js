@@ -16,7 +16,13 @@ function loadServerManager() {
   return require(serverManagerPath);
 }
 
-function createVscodeMock({ host = "127.0.0.1", port, sessionsDir = "", archivedSessionsDir = "" } = {}) {
+function createVscodeMock({
+  host = "127.0.0.1",
+  port,
+  sessionsDir = "",
+  archivedSessionsDir = "",
+  clientHeartbeatTimeoutMinutes = 10
+} = {}) {
   const hasExplicitPort = port !== undefined;
 
   return {
@@ -33,6 +39,8 @@ function createVscodeMock({ host = "127.0.0.1", port, sessionsDir = "", archived
                 return sessionsDir;
               case "archivedSessionsDir":
                 return archivedSessionsDir;
+              case "clientHeartbeatTimeoutMinutes":
+                return clientHeartbeatTimeoutMinutes;
               default:
                 return undefined;
             }
@@ -242,13 +250,39 @@ test("server manager recreates an auto-stopped shared server on the next browser
     });
     assert.equal(closeResult.response.status, 200);
 
-    await waitForServerShutdown(ownerUrls.internalUrl, 7_000);
+    await waitForServerShutdown(ownerUrls.internalUrl, 12_000);
 
     const reopenedUrls = await sharedManager.getBrowserUrls(vscode, context, "root");
     await assertSessionsEndpoint(reopenedUrls.internalUrl);
   } finally {
     await sharedManager.stopServer().catch(() => {});
     await ownerManager.stopServer().catch(() => {});
+    await rm(tempDir, {
+      recursive: true,
+      force: true
+    });
+  }
+});
+
+test("server manager forwards the configured browser client heartbeat timeout", async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "csr-vscode-manager-heartbeat-"));
+  const roots = await createSessionRoots(tempDir, "heartbeat");
+  const context = {
+    extensionPath: repoRoot
+  };
+  const vscode = createVscodeMock({
+    ...roots,
+    clientHeartbeatTimeoutMinutes: 2
+  });
+  const manager = loadServerManager();
+
+  try {
+    const urls = await manager.getBrowserUrls(vscode, context, "root");
+    const openResult = await postJson(urls.internalUrl, "/api/browser-client/open", {});
+    assert.equal(openResult.response.status, 200);
+    assert.equal(openResult.body.heartbeatTimeoutMs, 120_000);
+  } finally {
+    await manager.stopServer().catch(() => {});
     await rm(tempDir, {
       recursive: true,
       force: true

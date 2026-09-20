@@ -22,8 +22,8 @@ Structured image attachments and skill payloads render as readable cards instead
 - `Codex Session Renderer: Copy Browser URL`
 - `Codex Session Renderer: Run Developer Self-Check` (hidden unless `codexSessionRenderer.showDeveloperCommands` is enabled)
 
-The browser service started by the extension stops automatically after the last browser window or tab is closed.<br>
-扩展启动的浏览器服务会在最后一个浏览器窗口或标签页关闭后自动停止。
+The browser service started by the extension stops automatically after the last browser window or tab is closed. A suspended background page only expires its tracking record and cannot stop the service.<br>
+扩展启动的浏览器服务会在最后一个浏览器窗口或标签页关闭后自动停止。后台页面被挂起时只会使其追踪记录过期，不会停止服务。
 
 ## Settings / 设置
 
@@ -32,6 +32,7 @@ The browser service started by the extension stops automatically after the last 
 - `codexSessionRenderer.openMode`
 - `codexSessionRenderer.sessionsDir`
 - `codexSessionRenderer.archivedSessionsDir`
+- `codexSessionRenderer.clientHeartbeatTimeoutMinutes` (default: `10`; minimum: `1`)
 - `codexSessionRenderer.showDeveloperCommands`
 
 When Codex uses the default directories, no extra setup is required.<br>

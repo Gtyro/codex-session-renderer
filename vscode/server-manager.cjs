@@ -4,6 +4,7 @@ const { pathToFileURL } = require("node:url");
 
 const REGISTRY_BASENAME = "shared-server";
 const SERVER_PROBE_TIMEOUT_MS = 1_500;
+const DEFAULT_CLIENT_HEARTBEAT_TIMEOUT_MINUTES = 10;
 
 let serverStatePromise = null;
 
@@ -36,6 +37,7 @@ function getConfiguredServer(vscode) {
   const config = vscode.workspace.getConfiguration("codexSessionRenderer");
   const host = config.get("host") || "127.0.0.1";
   const configuredPort = Number(config.get("port"));
+  const configuredHeartbeatTimeoutMinutes = Number(config.get("clientHeartbeatTimeoutMinutes"));
   const inspectedPort = config.inspect("port");
   const hasExplicitPort =
     inspectedPort?.globalValue !== undefined ||
@@ -44,7 +46,11 @@ function getConfiguredServer(vscode) {
 
   return {
     host,
-    port: hasExplicitPort && Number.isFinite(configuredPort) ? configuredPort : undefined
+    port: hasExplicitPort && Number.isFinite(configuredPort) ? configuredPort : undefined,
+    clientHeartbeatTimeoutMs:
+      Number.isFinite(configuredHeartbeatTimeoutMinutes) && configuredHeartbeatTimeoutMinutes >= 1
+        ? Math.round(configuredHeartbeatTimeoutMinutes * 60_000)
+        : DEFAULT_CLIENT_HEARTBEAT_TIMEOUT_MINUTES * 60_000
   };
 }
 
@@ -138,12 +144,13 @@ function buildRegistryPayload(handle) {
 
 async function createServerHandle(vscode, context) {
   const { startWebServer } = await loadServerModule(context);
-  const { host, port } = getConfiguredServer(vscode);
+  const { host, port, clientHeartbeatTimeoutMs } = getConfiguredServer(vscode);
   const roots = getConfiguredRoots(vscode);
   return startWebServer({
     host,
     port,
     stopWhenIdle: true,
+    clientHeartbeatTimeoutMs,
     ...roots
   });
 }

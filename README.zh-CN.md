@@ -206,7 +206,7 @@ codex-session-renderer --id 019cea6d-7660-7c51-ade7-510d2bdf3caa --all
 
 扩展 manifest 直接复用仓库根目录的 `package.json`，扩展入口文件是 `vscode/extension.cjs`，Marketplace 文档使用单独的 `vscode/README.md` 和 `vscode/CHANGELOG.md`。
 扩展打开的浏览器视图保留与独立 Web 页面一致的深链接 URL 状态、对话轮次组织方式和 transcript 跳转能力。
-扩展启动的浏览器服务会在最后一个浏览器窗口或标签页关闭后自动停止。
+扩展启动的浏览器服务会在最后一个浏览器窗口或标签页关闭后自动停止。后台页面被挂起时只会使其追踪记录过期，不会停止服务。可通过 `codexSessionRenderer.clientHeartbeatTimeoutMinutes` 配置过期时间，默认 `10` 分钟，最小 `1` 分钟。
 在 Remote SSH、WSL 或其他远端扩展宿主下，扩展会先让 VS Code 把本地服务地址转换成客户端可访问的外部 URL，再用于打开浏览器或复制链接。
 
 从仓库根目录打包 `.vsix`：

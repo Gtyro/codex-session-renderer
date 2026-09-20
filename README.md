@@ -206,7 +206,7 @@ The extension contributes these commands:
 
 The extension manifest lives in the repo root `package.json`, the extension entrypoint is `vscode/extension.cjs`, and the Marketplace page uses the dedicated `vscode/README.md` and `vscode/CHANGELOG.md` instead of the project root docs.
 The browser view opened by the extension keeps the same deep-linked URL state, conversation-round grouping, and transcript jump navigation as the standalone web UI.
-The browser service started by the extension stops automatically after the last browser window or tab is closed.
+The browser service started by the extension stops automatically after the last browser window or tab is closed. A suspended background page only expires its tracking record and cannot stop the service. Configure the expiry with `codexSessionRenderer.clientHeartbeatTimeoutMinutes` (default: `10`, minimum: `1`).
 When running through Remote SSH, WSL, or another remote extension host, the extension asks VS Code to translate the local server URL into a client-accessible external URL before opening or copying it.
 
 To package a `.vsix` from this repo root:

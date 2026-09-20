@@ -83,6 +83,12 @@
           "default": "",
           "description": "Optional override for the archived sessions directory."
         },
+        "codexSessionRenderer.clientHeartbeatTimeoutMinutes": {
+          "type": "number",
+          "default": 10,
+          "minimum": 1,
+          "description": "Minutes a browser client may miss heartbeats before the extension forgets its client record. This never stops the server; closing the last browser page still does."
+        },
         "codexSessionRenderer.showDeveloperCommands": {
           "type": "boolean",
           "default": false,
