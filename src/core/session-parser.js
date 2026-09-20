@@ -1,8 +1,10 @@
-import { readFile } from "node:fs/promises";
+import { open, readFile, stat } from "node:fs/promises";
 import { extractSessionId } from "./session-store.js";
 import { countConversationRounds, splitConversationRounds } from "./conversation-rounds.js";
 
 const ANSI_PATTERN = /[\u001b\u009b][[\]()#;?]*(?:(?:\d{1,4}(?:;\d{0,4})*)?[0-9A-ORZcf-nqry=><~]|.)/gu;
+const SNAPSHOT_READ_CHUNK_BYTES = 64 * 1024;
+const USER_TRANSCRIPT_CONTROL_MESSAGE_PATTERN = /^<\/?(?:turn_aborted|user_turn_aborted)>/iu;
 
 function parseJsonLines(source) {
   return source
@@ -534,6 +536,313 @@ export async function loadSession(filePath, options = {}) {
   return session;
 }
 
+function buildMessageFromJsonlEntry(entry, options = {}) {
+  if (entry?.type !== "response_item") {
+    return null;
+  }
+
+  const payload = entry.payload || {};
+
+  if (payload.type !== "message") {
+    return null;
+  }
+
+  const role = payload.role || "unknown";
+  const { text, contentBlocks } = parseMessageBlocks(payload.content);
+
+  if (!text && contentBlocks.length === 0) {
+    return null;
+  }
+
+  if (role === "developer" && !options.includeDeveloper) {
+    return null;
+  }
+
+  if (role === "user" && !options.includeContext && looksLikeContextPrelude(text)) {
+    return null;
+  }
+
+  return {
+    kind: "message",
+    timestamp: entry.timestamp || null,
+    role,
+    phase: payload.phase || null,
+    text,
+    contentBlocks,
+    isContextPrelude: role === "user" ? looksLikeContextPrelude(text) : false
+  };
+}
+
+function parseJsonlBufferLine(buffer, offset) {
+  const source = buffer.toString("utf8").trim();
+
+  if (!source) {
+    return null;
+  }
+
+  return {
+    entry: JSON.parse(source),
+    offset
+  };
+}
+
+async function readJsonlFromHead(filePath, onLine) {
+  const handle = await open(filePath, "r");
+  let position = 0;
+  let pending = Buffer.alloc(0);
+  let pendingOffset = 0;
+
+  try {
+    while (true) {
+      const buffer = Buffer.allocUnsafe(SNAPSHOT_READ_CHUNK_BYTES);
+      const { bytesRead } = await handle.read(buffer, 0, buffer.length, position);
+
+      if (bytesRead <= 0) {
+        break;
+      }
+
+      const chunk = buffer.subarray(0, bytesRead);
+      const sourceOffset = pending.length > 0 ? pendingOffset : position;
+      const source = pending.length > 0 ? Buffer.concat([pending, chunk]) : chunk;
+      let lineStart = 0;
+
+      for (let index = 0; index < source.length; index += 1) {
+        if (source[index] !== 0x0a) {
+          continue;
+        }
+
+        const parsed = parseJsonlBufferLine(source.subarray(lineStart, index), sourceOffset + lineStart);
+        lineStart = index + 1;
+
+        if (parsed && (await onLine(parsed)) === false) {
+          return;
+        }
+      }
+
+      pending = source.subarray(lineStart);
+      pendingOffset = sourceOffset + lineStart;
+      position += bytesRead;
+    }
+
+    const parsed = parseJsonlBufferLine(pending, pendingOffset);
+    if (parsed) {
+      await onLine(parsed);
+    }
+  } finally {
+    await handle.close();
+  }
+}
+
+async function readJsonlFromTail(filePath, onLine) {
+  const [details, handle] = await Promise.all([stat(filePath), open(filePath, "r")]);
+  let position = details.size;
+  let pending = Buffer.alloc(0);
+
+  try {
+    while (position > 0) {
+      const length = Math.min(SNAPSHOT_READ_CHUNK_BYTES, position);
+      position -= length;
+      const buffer = Buffer.allocUnsafe(length);
+      const { bytesRead } = await handle.read(buffer, 0, length, position);
+      const chunk = buffer.subarray(0, bytesRead);
+      const source = pending.length > 0 ? Buffer.concat([chunk, pending]) : chunk;
+      let lineEnd = source.length;
+
+      for (let index = source.length - 1; index >= 0; index -= 1) {
+        if (source[index] !== 0x0a) {
+          continue;
+        }
+
+        const parsed = parseJsonlBufferLine(source.subarray(index + 1, lineEnd), position + index + 1);
+        lineEnd = index;
+
+        if (parsed && (await onLine(parsed)) === false) {
+          return;
+        }
+      }
+
+      pending = source.subarray(0, lineEnd);
+    }
+
+    const parsed = parseJsonlBufferLine(pending, 0);
+    if (parsed) {
+      await onLine(parsed);
+    }
+  } finally {
+    await handle.close();
+  }
+}
+
+function isEligibleUserMessage(item) {
+  return (
+    item?.kind === "message" &&
+    item.role === "user" &&
+    item.isContextPrelude !== true &&
+    !USER_TRANSCRIPT_CONTROL_MESSAGE_PATTERN.test(String(item.text ?? "").trim())
+  );
+}
+
+function addSnapshotItem(itemsByOffset, offset, item, label = null) {
+  if (!item || !Number.isFinite(offset)) {
+    return;
+  }
+
+  const existing = itemsByOffset.get(offset);
+
+  itemsByOffset.set(offset, {
+    item: existing?.item || item,
+    label: [existing?.label, label].filter(Boolean).join(" · ") || null
+  });
+}
+
+/**
+ * Reads only the messages required for the default first-and-last recall view.
+ * The middle of a JSONL is intentionally never parsed here: aggregate process
+ * metrics are deferred to the explicit analysis/full reader paths.
+ */
+export async function loadSessionMemorySnapshot(filePath, options = {}) {
+  let meta = {};
+  let firstTimestamp = null;
+  let firstUser = null;
+  let firstFinalAssistant = null;
+  let firstLatestAssistant = null;
+
+  await readJsonlFromHead(filePath, ({ entry, offset }) => {
+    firstTimestamp ||= entry.timestamp || null;
+
+    if (entry.type === "session_meta") {
+      meta = entry.payload || {};
+      return true;
+    }
+
+    const item = buildMessageFromJsonlEntry(entry, options);
+
+    if (!item) {
+      return true;
+    }
+
+    if (!firstUser && isEligibleUserMessage(item)) {
+      firstUser = { item, offset };
+      return true;
+    }
+
+    // A response belongs to the current request only up to the next request.
+    // This matters for historical Codex sessions that predate `final_answer`
+    // phases: without this boundary, the newest answer is shown under the
+    // first request in the memory snapshot.
+    if (firstUser && isEligibleUserMessage(item)) {
+      // Consecutive user messages before any assistant output are one
+      // interrupted/follow-up request group. Keep reading so the first
+      // displayed request can still carry that group's eventual answer.
+      return !firstLatestAssistant;
+    }
+
+    if (firstUser && item.role === "assistant") {
+      firstLatestAssistant = { item, offset };
+
+      if (isFinalAssistantMessage(item)) {
+        firstFinalAssistant = firstLatestAssistant;
+        return false;
+      }
+    }
+
+    return true;
+  });
+
+  const tailUsers = [];
+  const tailResponsesByUserOffset = new Map();
+  let nearestFinalAssistant = null;
+  let nearestAssistant = null;
+
+  await readJsonlFromTail(filePath, ({ entry, offset }) => {
+    const item = buildMessageFromJsonlEntry(entry, options);
+
+    if (!item) {
+      return true;
+    }
+
+    if (item.role === "assistant") {
+      nearestAssistant ||= { item, offset };
+
+      if (isFinalAssistantMessage(item)) {
+        nearestFinalAssistant = { item, offset };
+      }
+
+      return true;
+    }
+
+    if (!isEligibleUserMessage(item)) {
+      return true;
+    }
+
+    tailUsers.push({ item, offset });
+    tailResponsesByUserOffset.set(offset, nearestFinalAssistant || nearestAssistant || null);
+
+    // While reading backwards, discard the answer just associated with this
+    // request. An older request must not inherit it across a newer user turn.
+    nearestFinalAssistant = null;
+    nearestAssistant = null;
+
+    return tailUsers.length < 2;
+  });
+
+  const itemsByOffset = new Map();
+
+  if (firstUser) {
+    addSnapshotItem(itemsByOffset, firstUser.offset, firstUser.item, "首个请求");
+    const response = firstFinalAssistant || firstLatestAssistant;
+    if (response) {
+      addSnapshotItem(itemsByOffset, response.offset, response.item);
+    }
+  }
+
+  [...tailUsers].reverse().forEach((user, index, users) => {
+    const label = index === users.length - 1 ? "最新请求" : "倒数第 2 个请求";
+    addSnapshotItem(itemsByOffset, user.offset, user.item, label);
+    const response = tailResponsesByUserOffset.get(user.offset);
+    if (response) {
+      addSnapshotItem(itemsByOffset, response.offset, response.item);
+    }
+  });
+
+  const items = [...itemsByOffset.entries()]
+    .sort(([left], [right]) => left - right)
+    .map(([, entry]) => ({
+      ...entry.item,
+      snapshotExcerpt: true,
+      snapshotLabel: entry.label
+    }));
+
+  return {
+    id: meta.id || extractSessionId(filePath),
+    filePath,
+    startedAt: meta.timestamp || firstTimestamp,
+    cwd: meta.cwd || null,
+    source: meta.source || null,
+    originator: meta.originator || null,
+    cliVersion: meta.cli_version || null,
+    modelProvider: meta.model_provider || null,
+    items,
+    tokenSnapshots: [],
+    activityEvents: [],
+    selection: {
+      mode: "memory_snapshot",
+      summaryComplete: false,
+      totalRounds: null,
+      totalItems: null,
+      displayedItems: items.length,
+      omittedItems: null,
+      totalUserMessages: null,
+      displayedUserMessages: items.filter(isEligibleUserMessage).length,
+      totalFinalAnswers: null,
+      totalToolCalls: null,
+      totalTokens: null,
+      firstUserIncluded: Boolean(firstUser),
+      tailUserMessagesIncluded: tailUsers.length
+    }
+  };
+}
+
 function sliceTokenSnapshots(tokenSnapshots, startIndex) {
   const sourceSnapshots = Array.isArray(tokenSnapshots) ? tokenSnapshots : [];
 
@@ -643,6 +952,122 @@ export function selectRecentRounds(session, rounds) {
       roundsRequested: rounds,
       roundsIncluded: rounds,
       totalRounds
+    }
+  };
+}
+
+function isConversationUserMessage(item) {
+  return isEligibleUserMessage(item);
+}
+
+function isAssistantMessage(item) {
+  return item?.kind === "message" && item.role === "assistant";
+}
+
+function isFinalAssistantMessage(item) {
+  return isAssistantMessage(item) && item.phase === "final_answer";
+}
+
+function findSnapshotResponseIndex(items, userIndex) {
+  let latestAssistantIndex = null;
+
+  for (let index = userIndex + 1; index < items.length; index += 1) {
+    const item = items[index];
+
+    if (isConversationUserMessage(item)) {
+      break;
+    }
+
+    if (isFinalAssistantMessage(item)) {
+      return index;
+    }
+
+    if (isAssistantMessage(item)) {
+      latestAssistantIndex = index;
+    }
+  }
+
+  return latestAssistantIndex;
+}
+
+function sumRecordedTokens(tokenSnapshots) {
+  return (Array.isArray(tokenSnapshots) ? tokenSnapshots : []).reduce((total, snapshot) => {
+    const tokens = Number(snapshot?.tokens ?? snapshot?.totalTokens ?? 0);
+    return Number.isFinite(tokens) && tokens > 0 ? total + tokens : total;
+  }, 0);
+}
+
+/**
+ * Selects a compact recall view: the first user request and the two most
+ * recent user requests, each paired with its final (or latest) assistant
+ * response. The omitted process stays summarized in `selection` instead of
+ * being serialized into the interactive browser payload.
+ */
+export function selectSessionMemorySnapshot(session) {
+  const items = Array.isArray(session?.items) ? session.items : [];
+  const userIndexes = items
+    .map((item, index) => (isConversationUserMessage(item) ? index : null))
+    .filter((index) => Number.isInteger(index));
+  const firstUserIndex = userIndexes[0] ?? null;
+  const tailUserIndexes = userIndexes.slice(-2);
+  const selectedUserIndexes = [...new Set([firstUserIndex, ...tailUserIndexes].filter(Number.isInteger))].sort(
+    (left, right) => left - right
+  );
+  const selectedIndexes = new Set(selectedUserIndexes);
+  const labelsByIndex = new Map();
+
+  if (Number.isInteger(firstUserIndex)) {
+    labelsByIndex.set(firstUserIndex, "首个请求");
+  }
+
+  tailUserIndexes.forEach((index, tailIndex) => {
+    const label = tailUserIndexes.length === 1 || tailIndex === tailUserIndexes.length - 1
+      ? "最新请求"
+      : "倒数第 2 个请求";
+    const existing = labelsByIndex.get(index);
+    labelsByIndex.set(index, existing ? `${existing} · ${label}` : label);
+  });
+
+  selectedUserIndexes.forEach((userIndex) => {
+    const responseIndex = findSnapshotResponseIndex(items, userIndex);
+
+    if (Number.isInteger(responseIndex)) {
+      selectedIndexes.add(responseIndex);
+    }
+  });
+
+  const snapshotItems = [...selectedIndexes]
+    .sort((left, right) => left - right)
+    .map((index) => ({
+      ...items[index],
+      snapshotExcerpt: true,
+      snapshotLabel: labelsByIndex.get(index) || null
+    }));
+  const totalRounds = countConversationRounds(items);
+  const totalToolCalls = items.filter((item) => item?.kind === "tool_call").length;
+  const totalFinalAnswers = items.filter(isFinalAssistantMessage).length;
+
+  return {
+    ...session,
+    items: snapshotItems,
+    // Token snapshot items can reference every original transcript item. They
+    // are intentionally omitted here so a compact view does not carry the
+    // whole session back to the browser indirectly.
+    tokenSnapshots: [],
+    activityEvents: [],
+    selection: {
+      mode: "memory_snapshot",
+      totalRounds,
+      totalItems: items.length,
+      displayedItems: snapshotItems.length,
+      omittedItems: Math.max(0, items.length - snapshotItems.length),
+      totalUserMessages: userIndexes.length,
+      displayedUserMessages: selectedUserIndexes.length,
+      totalFinalAnswers,
+      totalToolCalls,
+      totalTokens: sumRecordedTokens(session?.tokenSnapshots),
+      firstUserIncluded: Number.isInteger(firstUserIndex),
+      tailUserMessagesIncluded: tailUserIndexes.length
     }
   };
 }

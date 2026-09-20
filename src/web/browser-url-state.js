@@ -1,8 +1,14 @@
 export const DEFAULT_BROWSER_SCOPE = "active";
+export const DEFAULT_BROWSER_WORKSPACE = "";
+export const READER_MODES = Object.freeze({
+  snapshot: "snapshot",
+  recent: "recent",
+  all: "all"
+});
 
 export const DEFAULT_BROWSER_OPTIONS = Object.freeze({
+  readerMode: READER_MODES.snapshot,
   rounds: 1,
-  all: true,
   includeContext: false,
   includeDeveloper: false,
   includeReasoning: false
@@ -32,6 +38,24 @@ function parseBooleanWithDefault(value, fallbackValue) {
   return fallbackValue;
 }
 
+function normalizeReaderMode(value, legacyAll = null) {
+  if (value === READER_MODES.snapshot || value === READER_MODES.recent || value === READER_MODES.all) {
+    return value;
+  }
+
+  // Retain existing shared links. Before the snapshot view existed, all=1
+  // meant the whole transcript and all=0 meant recent rounds.
+  if (legacyAll === "1" || legacyAll === "true") {
+    return READER_MODES.all;
+  }
+
+  if (legacyAll === "0" || legacyAll === "false") {
+    return READER_MODES.recent;
+  }
+
+  return DEFAULT_BROWSER_OPTIONS.readerMode;
+}
+
 function parsePositiveInteger(value, fallbackValue) {
   const parsed = Number.parseInt(value ?? "", 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallbackValue;
@@ -51,6 +75,17 @@ function normalizeLocation(value) {
   }
 
   return "sessions";
+}
+
+function normalizeWorkspace(value) {
+  const workspace = String(value ?? "").trim();
+
+  if (!workspace) {
+    return DEFAULT_BROWSER_WORKSPACE;
+  }
+
+  const withoutTrailingSeparator = workspace.replace(/[\\/]+$/u, "");
+  return withoutTrailingSeparator || workspace;
 }
 
 function deriveScope(scope, selectedSession) {
@@ -77,11 +112,8 @@ function extractSelectedSessionId(pathname) {
 
 export function normalizeBrowserOptions(options = {}) {
   return {
+    readerMode: normalizeReaderMode(options.readerMode ?? options.view, options.all),
     rounds: parsePositiveInteger(options.rounds, DEFAULT_BROWSER_OPTIONS.rounds),
-    all:
-      typeof options.all === "boolean"
-        ? options.all
-        : parseBooleanWithDefault(options.all, DEFAULT_BROWSER_OPTIONS.all),
     includeContext:
       typeof options.includeContext === "boolean"
         ? options.includeContext
@@ -117,10 +149,12 @@ export function parseBrowserUrlState(input) {
 
   return {
     scope: deriveScope(searchParams.get("scope"), selectedSession),
+    workspace: normalizeWorkspace(searchParams.get("workspace")),
     search: searchParams.get("q")?.trim() || "",
     selectedSessionId: selectedSessionId || "",
     selectedSession,
     options: normalizeBrowserOptions({
+      readerMode: searchParams.get("view"),
       rounds: searchParams.get("rounds"),
       all: searchParams.get("all"),
       includeContext: searchParams.get("includeContext"),
@@ -134,6 +168,7 @@ export function buildBrowserUrlState(route = {}, options = {}) {
   const searchParams = new URLSearchParams();
   const browserOptions = normalizeBrowserOptions(route.options);
   const scope = normalizeScope(route.scope);
+  const workspace = normalizeWorkspace(route.workspace);
   const selectedSessionId = String(
     route.selectedSessionId ?? route.selectedSession?.id ?? ""
   ).trim();
@@ -148,6 +183,10 @@ export function buildBrowserUrlState(route = {}, options = {}) {
 
   searchParams.set("scope", scope);
 
+  if (workspace) {
+    searchParams.set("workspace", workspace);
+  }
+
   if (!selectedSessionId && selectedSession?.relativePath) {
     searchParams.set("location", selectedSession.location);
     searchParams.set("relativePath", selectedSession.relativePath);
@@ -157,11 +196,14 @@ export function buildBrowserUrlState(route = {}, options = {}) {
     searchParams.set("q", search);
   }
 
-  if (!browserOptions.all) {
-    searchParams.set("all", "0");
+  if (browserOptions.readerMode !== DEFAULT_BROWSER_OPTIONS.readerMode) {
+    searchParams.set("view", browserOptions.readerMode);
   }
 
-  if (!browserOptions.all || browserOptions.rounds !== DEFAULT_BROWSER_OPTIONS.rounds) {
+  if (
+    browserOptions.readerMode === READER_MODES.recent &&
+    browserOptions.rounds !== DEFAULT_BROWSER_OPTIONS.rounds
+  ) {
     searchParams.set("rounds", String(browserOptions.rounds));
   }
 

@@ -9,11 +9,13 @@ It reads session files from `~/.codex/sessions` and `~/.codex/archived_sessions`
 ## Highlights
 
 - Browse active and archived sessions in a full browser UI.
+- Filter sessions by their recorded workspace (`cwd`), with a separate fallback choice for older logs that lack one.
 - Rename titles inline, archive or restore sessions, and permanently delete archived sessions.
 - Keep deep-linked URLs that preserve scope, search, selected session, and reader options.
 - Group transcript activity into conversation rounds, collapse process-heavy sections, and jump with `[` / `]`.
 - Connect Goals, delegated subtasks, `task_started` lifecycle events, tool calls, and detected verification results; linked evidence jumps back to the original transcript.
 - Render structured image attachments, attached-file callouts, and skill payloads as readable cards instead of raw protocol text.
+- Build local, redacted optimization evidence and live campaign traces: worker/reviewer activity, instruction revisions, validation, token/time metrics, and safe instruction-asset patch history.
 - Export the current view as compact/full Markdown, HTML, and optional PNG.
 
 ## Requirements
@@ -37,6 +39,33 @@ By default the browser reads:
 - `~/.codex/sessions`
 - `~/.codex/archived_sessions`
 
+## Make Targets
+
+For local repository work, the repo root also provides a small `make` facade:
+
+```bash
+make deps
+make dev
+make stop
+make test
+make build
+```
+
+Semantics:
+
+- `make dev`
+  - standalone browser UI for local development/debugging
+- `make stop`
+  - best-effort stop for the standalone `make dev` server only
+- `make test`
+  - Node test suite
+- `make build`
+  - package the VS Code extension as a `.vsix`
+
+The day-to-day primary user flow still remains the VS Code host command:
+
+- `Codex Session Renderer: Open Session Browser`
+
 ## Browser UI
 
 Start the built-in browser:
@@ -51,11 +80,42 @@ Use custom active and archived session directories:
 npm run web -- --sessions-dir /path/to/sessions --archived-sessions-dir /path/to/archived_sessions
 ```
 
-The browser prefers `thread_name` from `~/.codex/session_index.jsonl` for session titles and falls back to the Codex state database when needed. You can double-click a title to rename it inline, use the toolbar actions to archive, restore, or delete sessions, and reopen the same view later through its deep-linked URL.
+The browser prefers `thread_name` from `~/.codex/session_index.jsonl` for session titles and falls back to the Codex state database when needed. Use the sidebar workspace selector to filter by the `cwd` recorded in each session's metadata. Recorded workspaces are ordered by their most recently updated session, while **Unrecorded workspace** stays last; **All workspaces** stays first. Double-click an active session title to rename it inline, or double-click an archived session to delete it and use the non-blocking **Undo** prompt if needed. The toolbar can also archive, restore, or delete sessions, and deep-linked URLs reopen the same view later.
 
 ## CLI Export
 
 The browser UI is the primary experience. The CLI is for exporting snapshots and shareable artifacts.
+
+## Optimization analysis
+
+Open a session in the browser and use **Copy full analysis pack**. The browser derives a local evidence summary plus an expandable task trace from persisted session events, then places a redacted prompt on the clipboard for a Codex review. Each trace entry can jump back to the original transcript.
+
+The report distinguishes recorded facts from hypotheses and does not claim exact per-skill or per-document token attribution. It never changes `AGENTS.md`, skills, READMEs, or other documentation; any recommended changes remain proposals to review and validate against repeated task cases.
+
+Use **Run Codex analysis** only when you want the local server to start a separate Codex CLI review. The browser asks for confirmation, runs `codex exec` with `--sandbox read-only --ephemeral`, and displays only its redacted final report. It does not apply that report or write to the analyzed workspace.
+
+## Agent Workflow Optimizer
+
+Install `$agent-workflow-optimizer` into your Codex Skills directory, then use natural-language requests such as:
+
+```text
+$agent-workflow-optimizer Review today's mygog add-game work and optimize the relevant instructions.
+$agent-workflow-optimizer Use $mygog-add-game to add Braid, 忍道焰, and Sea Watchers; improve the workflow while processing the list.
+```
+
+For a selected browser session, **Hand to optimizer Skill** only copies the corresponding foreground request. Paste it into the current Codex conversation; the browser never launches a hidden Codex task.
+
+Repeated-task requests create a local campaign under `~/.codex-session-renderer/campaigns`. Every campaign worker starts through `csr campaign run`: CSR owns a persistent `codex exec --json` process, records its stable thread and structured token/time events, and streams them into the campaign panel. A successful process becomes **awaiting validation**, not a passed task; explicit acceptance evidence is required before `csr campaign validate --from-run ...` records the outcome. Reviewers run separately in an empty read-only checkpoint sandbox and receive only the coordinator's compact checkpoint, not a workspace, registered assets, raw sessions, or tool-discovery work. Native delegated agents are excluded from campaigns because the current Codex runtime cannot independently attribute their token or elapsed-time cost. Unknown or shared-write tasks run serially; proven-independent tasks may run in parallel waves with one fixed instruction revision.
+
+Historical or externally created workers can still be measured from an explicitly selected persisted session through `csr campaign measure`; neither the user nor the agent reads raw JSONL directly. The App Server bridge is optional enrichment, not a campaign dependency. A missing token count is displayed as unknown, never as zero, and cannot satisfy the token-saving requirement for a durable patch.
+
+An overlay can improve the next task immediately. A durable `SKILL.md`, `README*.md`, or `docs/*.md` patch is applied only after two successful paired cases in one cohort show lower worker token cost. Each pair must be actual CSR worker runs with explicit acceptance validation, the same model/command/arguments/sandbox/prompt, and separate clean workspace copies of one snapshot; tokens and provenance are read from the recorded runs, never hand-entered. Historical sessions can select cases but cannot serve as the CSR baseline. Worker tokens are the promotion metric; elapsed time is displayed as a regression warning, while reviewer token/time is separate overhead. `AGENTS.md` is never auto-edited, automatic changes are not committed, merge conflicts are left untouched, and `csr campaign rollback` only reverses an unchanged applied patch. Completed ledgers can be retained without clutter through `csr campaign archive --run <id>` and recovered with `csr campaign restore --run <id>`.
+
+For an agent-created disposable worktree, create the campaign with `--disposable-workspace`. CSR accepts this only for an existing, non-symlink directory beneath the system temporary directory. Its resolved path and filesystem identity are recorded; `csr campaign archive --run <id>` then removes that exact workspace before moving the ledger to the recoverable archive. Every other campaign workspace is retained, and a missing disposable workspace is recorded rather than treated as an error.
+
+For a per-run isolated worktree, pass both `--execution-cwd /tmp/<case>` and `--disposable-execution-cwd` to a worker run. CSR verifies the same boundary and removes that exact worktree after the run has recorded its final measurement; cleanup is retained as a campaign event.
+
+`csr sessions search`, `csr sessions pick`, and `csr session evidence` are the Skill's session data-plane commands. They support natural-language resolution and an arrow-key picker, and intentionally do not default to global `latest`.
 
 Render the latest session:
 

@@ -4,7 +4,9 @@ import os from "node:os";
 import path from "node:path";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import {
+  loadSessionMemorySnapshot,
   loadSession,
+  selectSessionMemorySnapshot,
   selectRecentRounds,
   splitSessionIntoRounds
 } from "../src/core/session-parser.js";
@@ -107,6 +109,210 @@ test("selectRecentRounds trims token snapshots together with the selected rounds
     selected.tokenSnapshots[0].items.map((item) => item.text),
     ["需求 B", "处理 2"]
   );
+});
+
+test("selectSessionMemorySnapshot keeps the first request and the last two requests with their answers", () => {
+  const session = {
+    id: "demo",
+    items: [
+      buildMessage("user", "最初需求"),
+      buildMessage("assistant", "最初总结", { phase: "final_answer" }),
+      buildMessage("user", "中间需求"),
+      buildToolEvent("exec_command"),
+      buildMessage("assistant", "中间总结", { phase: "final_answer" }),
+      buildMessage("user", "倒数第二个需求"),
+      buildMessage("assistant", "倒数第二个总结", { phase: "final_answer" }),
+      buildMessage("user", "最新需求"),
+      buildMessage("assistant", "最新总结", { phase: "final_answer" })
+    ],
+    tokenSnapshots: [buildTokenSnapshot(300, [])]
+  };
+
+  const snapshot = selectSessionMemorySnapshot(session);
+
+  assert.deepEqual(
+    snapshot.items.map((item) => item.text),
+    ["最初需求", "最初总结", "倒数第二个需求", "倒数第二个总结", "最新需求", "最新总结"]
+  );
+  assert.equal(snapshot.items[0].snapshotLabel, "首个请求");
+  assert.equal(snapshot.items[2].snapshotLabel, "倒数第 2 个请求");
+  assert.equal(snapshot.items[4].snapshotLabel, "最新请求");
+  assert.equal(snapshot.selection.mode, "memory_snapshot");
+  assert.equal(snapshot.selection.totalRounds, 4);
+  assert.equal(snapshot.selection.omittedItems, 3);
+  assert.equal(snapshot.selection.totalTokens, 300);
+  assert.deepEqual(snapshot.tokenSnapshots, []);
+});
+
+test("selectSessionMemorySnapshot falls back to the latest assistant progress when a request has no final answer", () => {
+  const session = {
+    id: "demo",
+    items: [
+      buildMessage("user", "仍在处理的需求"),
+      buildMessage("assistant", "正在检查", { phase: "commentary" }),
+      buildToolEvent("exec_command")
+    ]
+  };
+
+  const snapshot = selectSessionMemorySnapshot(session);
+
+  assert.deepEqual(snapshot.items.map((item) => item.text || item.name), ["仍在处理的需求", "正在检查"]);
+  assert.equal(snapshot.selection.omittedItems, 1);
+});
+
+test("selectSessionMemorySnapshot ignores injected turn-aborted control messages", () => {
+  const session = {
+    id: "demo",
+    items: [
+      buildMessage("user", "First request"),
+      buildMessage("assistant", "First answer", { phase: "final_answer" }),
+      buildMessage("user", "Second-last request"),
+      buildMessage("user", "<turn_aborted>The user interrupted the previous turn.</turn_aborted>"),
+      buildMessage("user", "Latest request"),
+      buildMessage("assistant", "Latest answer", { phase: "final_answer" })
+    ]
+  };
+
+  const snapshot = selectSessionMemorySnapshot(session);
+
+  assert.deepEqual(
+    snapshot.items.map((item) => item.text),
+    ["First request", "First answer", "Second-last request", "Latest request", "Latest answer"]
+  );
+  assert.equal(snapshot.selection.totalUserMessages, 3);
+});
+
+test("selectSessionMemorySnapshot keeps legacy unphased answers with their own requests", () => {
+  const session = {
+    id: "legacy-demo",
+    items: [
+      buildMessage("user", "首个请求"),
+      buildMessage("assistant", "首个答复"),
+      buildMessage("user", "倒数第二个请求"),
+      buildMessage("assistant", "倒数第二个答复"),
+      buildMessage("user", "最新请求"),
+      buildMessage("assistant", "最新答复")
+    ]
+  };
+
+  const snapshot = selectSessionMemorySnapshot(session);
+
+  assert.deepEqual(snapshot.items.map((item) => item.text), [
+    "首个请求",
+    "首个答复",
+    "倒数第二个请求",
+    "倒数第二个答复",
+    "最新请求",
+    "最新答复"
+  ]);
+});
+
+test("loadSessionMemorySnapshot reads only the first request and the last two requests with final answers", async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "csr-session-snapshot-"));
+  const filePath = path.join(tempDir, "11111111-1111-1111-1111-111111111111.jsonl");
+  const records = [
+    { type: "session_meta", timestamp: "2026-08-21T00:00:00.000Z", payload: { id: "snapshot-demo", cwd: tempDir } },
+    {
+      type: "response_item",
+      payload: { type: "message", role: "user", content: [{ type: "input_text", text: "First request" }] }
+    },
+    {
+      type: "response_item",
+      payload: { type: "message", role: "user", content: [{ type: "input_text", text: "First follow-up" }] }
+    },
+    {
+      type: "response_item",
+      payload: {
+        type: "message",
+        role: "assistant",
+        phase: "final_answer",
+        content: [{ type: "output_text", text: "First final answer" }]
+      }
+    },
+    { type: "response_item", payload: { type: "function_call", name: "exec", call_id: "middle", arguments: "{}" } },
+    {
+      type: "response_item",
+      payload: { type: "message", role: "user", content: [{ type: "input_text", text: "Second-last request" }] }
+    },
+    {
+      type: "response_item",
+      payload: {
+        type: "message",
+        role: "assistant",
+        phase: "final_answer",
+        content: [{ type: "output_text", text: "Second-last final answer" }]
+      }
+    },
+    {
+      type: "response_item",
+      payload: { type: "message", role: "user", content: [{ type: "input_text", text: "Latest request" }] }
+    },
+    {
+      type: "response_item",
+      payload: {
+        type: "message",
+        role: "assistant",
+        phase: "final_answer",
+        content: [{ type: "output_text", text: "Latest final answer" }]
+      }
+    }
+  ];
+
+  try {
+    await writeFile(filePath, `${records.map((record) => JSON.stringify(record)).join("\n")}\n`, "utf8");
+    const snapshot = await loadSessionMemorySnapshot(filePath);
+
+    assert.equal(snapshot.id, "snapshot-demo");
+    assert.equal(snapshot.cwd, tempDir);
+    assert.deepEqual(
+      snapshot.items.map((item) => item.text),
+      ["First request", "First final answer", "Second-last request", "Second-last final answer", "Latest request", "Latest final answer"]
+    );
+    assert.equal(snapshot.items[0].snapshotLabel, "首个请求");
+    assert.equal(snapshot.items[2].snapshotLabel, "倒数第 2 个请求");
+    assert.equal(snapshot.items[4].snapshotLabel, "最新请求");
+    assert.equal(snapshot.selection.summaryComplete, false);
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("loadSessionMemorySnapshot does not reuse the newest legacy answer for every request", async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "csr-session-snapshot-legacy-"));
+  const filePath = path.join(tempDir, "22222222-2222-2222-2222-222222222222.jsonl");
+  const message = (role, text) => ({
+    type: "response_item",
+    payload: {
+      type: "message",
+      role,
+      content: [{ type: role === "assistant" ? "output_text" : "input_text", text }]
+    }
+  });
+  const records = [
+    { type: "session_meta", timestamp: "2026-02-04T00:00:00.000Z", payload: { id: "legacy-snapshot" } },
+    message("user", "首个请求"),
+    message("assistant", "首个答复"),
+    message("user", "倒数第二个请求"),
+    message("assistant", "倒数第二个答复"),
+    message("user", "最新请求"),
+    message("assistant", "最新答复")
+  ];
+
+  try {
+    await writeFile(filePath, `${records.map((record) => JSON.stringify(record)).join("\n")}\n`, "utf8");
+    const snapshot = await loadSessionMemorySnapshot(filePath);
+
+    assert.deepEqual(snapshot.items.map((item) => item.text), [
+      "首个请求",
+      "首个答复",
+      "倒数第二个请求",
+      "倒数第二个答复",
+      "最新请求",
+      "最新答复"
+    ]);
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
 });
 
 test("splitSessionIntoRounds groups interrupted user follow-ups into the same round until final answer", () => {

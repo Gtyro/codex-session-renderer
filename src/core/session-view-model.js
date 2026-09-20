@@ -1,12 +1,15 @@
 import { getSessionRecord, SESSION_LOCATIONS } from "./session-store.js";
 import { splitConversationRounds } from "./conversation-rounds.js";
-import { loadSession, selectRecentRounds } from "./session-parser.js";
+import { loadSession, loadSessionMemorySnapshot, selectRecentRounds } from "./session-parser.js";
+import { deriveOptimizationAnalysis } from "./optimization-analysis.js";
 import { sessionToMarkdown } from "./markdown.js";
 import { renderMarkdownDocument } from "../render/html.js";
 import { renderMarkdownFragment } from "../render/fragment.js";
 import {
   collapsePairedSkillMessages,
   formatMessageTextForPresentation,
+  parseIdeContextMessagePresentation,
+  parseUserMessagePresentation,
   parseSkillMessagePresentation
 } from "../shared/message-presentation.js";
 
@@ -41,6 +44,22 @@ function parsePositiveInteger(value, fallbackValue) {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallbackValue;
 }
 
+function parseReaderMode(value, legacyAll) {
+  if (value === "snapshot" || value === "recent" || value === "all") {
+    return value;
+  }
+
+  if (parseBoolean(legacyAll)) {
+    return "all";
+  }
+
+  if (legacyAll === "0" || legacyAll === "false") {
+    return "recent";
+  }
+
+  return "snapshot";
+}
+
 function escapeHtml(value) {
   return String(value ?? "")
     .replaceAll("&", "&amp;")
@@ -63,6 +82,64 @@ function renderImageBlockHtml(block) {
       </div>
       <figcaption>Attached image${detailLabel}</figcaption>
     </figure>
+  `;
+}
+
+function parseMentionedFileLocation(value) {
+  const source = String(value ?? "").trim();
+  const rangeMatch = source.match(/\s+\((?:lines?|line)\s+(\d+)(?:\s*(?:-|–|—|to)\s*(\d+))?\)\s*$/iu);
+
+  if (!rangeMatch) {
+    return {
+      path: source,
+      lineRange: null
+    };
+  }
+
+  const [, firstLine, lastLine] = rangeMatch;
+
+  return {
+    path: source.slice(0, rangeMatch.index).trim(),
+    lineRange: lastLine ? `第 ${firstLine}–${lastLine} 行` : `第 ${firstLine} 行`
+  };
+}
+
+function renderSnapshotFileReferencesHtml(attachments) {
+  const files = Array.isArray(attachments) ? attachments : [];
+
+  if (files.length === 0) {
+    return "";
+  }
+
+  const references = files
+    .map((attachment) => {
+      const location = parseMentionedFileLocation(attachment.path);
+      const lineRange = location.lineRange
+        ? `<span class="snapshot-file-reference-lines">${escapeHtml(location.lineRange)}</span>`
+        : "";
+      const path = location.path || attachment.path;
+
+      return `
+        <li class="snapshot-file-reference-item">
+          <div class="snapshot-file-reference-summary">
+            <code>${escapeHtml(attachment.label)}</code>
+            ${lineRange}
+          </div>
+          <div class="snapshot-file-reference-details">
+            <span>完整路径</span>
+            <code>${escapeHtml(path)}</code>
+          </div>
+        </li>
+      `;
+    })
+    .join("");
+  const title = files.length === 1 ? "提及文件" : `提及文件（${files.length}）`;
+
+  return `
+    <aside class="snapshot-file-references" aria-label="${escapeAttribute(title)}">
+      <div class="snapshot-file-reference-title">${escapeHtml(title)}</div>
+      <ul>${references}</ul>
+    </aside>
   `;
 }
 
@@ -117,6 +194,27 @@ function renderSkillBlockHtml(skill) {
 function renderMessageContent(item) {
   const role = item.role || "unknown";
   const contentBlocks = Array.isArray(item.contentBlocks) ? item.contentBlocks : [];
+  const snapshotIdeContext =
+    item.snapshotExcerpt && role === "user" ? parseIdeContextMessagePresentation(item.text) : null;
+  const snapshotUserPresentation =
+    item.snapshotExcerpt && role === "user" && !snapshotIdeContext
+      ? parseUserMessagePresentation(item.text)
+      : null;
+  const snapshotRequest = snapshotIdeContext?.requestText || snapshotUserPresentation?.requestText || null;
+
+  // Protocol envelopes are useful in the full transcript, but they consume
+  // the fixed-height user slot in the first-and-last recall view. The request
+  // itself is the information needed to recognize the conversation.
+  if (snapshotRequest) {
+    const displayText = formatMessageTextForPresentation(snapshotRequest, role);
+    const fileReferences = renderSnapshotFileReferencesHtml(snapshotUserPresentation?.attachments);
+
+    return {
+      displayText,
+      renderedHtml: `${fileReferences}${renderMarkdownFragment(displayText)}`
+    };
+  }
+
   const skillPresentation = parseSkillMessagePresentation(item.text);
   const canRenderSkillCard =
     skillPresentation &&
@@ -628,9 +726,11 @@ function buildTokenSegments(tokenSnapshots) {
 }
 
 export function parsePreviewOptions(searchParams) {
+  const legacyAll = searchParams.get("all");
+
   return {
     mode: searchParams.get("mode") === "full" ? "full" : "compact",
-    all: parseBoolean(searchParams.get("all")),
+    readerMode: parseReaderMode(searchParams.get("view"), legacyAll),
     rounds: parsePositiveInteger(searchParams.get("rounds"), 1),
     includeContext: parseBoolean(searchParams.get("includeContext")),
     includeDeveloper: parseBoolean(searchParams.get("includeDeveloper")),
@@ -652,18 +752,25 @@ export async function buildSessionPayload(roots, searchParams) {
     location,
     relativePath
   });
-  const loadedSession = await loadSession(record.filePath, {
+  const loadOptions = {
     includeContext: previewOptions.includeContext,
     includeDeveloper: previewOptions.includeDeveloper,
     includeReasoning: previewOptions.includeReasoning
-  });
-  const session = previewOptions.all
-    ? selectRecentRounds(loadedSession, 0)
-    : selectRecentRounds(loadedSession, previewOptions.rounds);
+  };
+  const session =
+    previewOptions.readerMode === "snapshot"
+      ? await loadSessionMemorySnapshot(record.filePath, loadOptions)
+      : await loadSession(record.filePath, loadOptions);
+  const selectedSession =
+    previewOptions.readerMode === "all"
+      ? selectRecentRounds(session, 0)
+      : previewOptions.readerMode === "recent"
+      ? selectRecentRounds(session, previewOptions.rounds)
+      : session;
 
   return {
     record,
-    session,
+    session: selectedSession,
     previewOptions
   };
 }
@@ -727,10 +834,14 @@ export function buildInteractiveSession(session) {
     return item;
   });
 
+  const optimizationAnalysis =
+    session?.selection?.mode === "memory_snapshot" ? null : deriveOptimizationAnalysis(session);
+
   return {
     ...sessionWithoutSnapshots,
     tokenStats,
     tokenSegments,
+    optimizationAnalysis,
     items,
     conversationBlocks: splitConversationRounds(items).map((block) => ({
       index: block.index,

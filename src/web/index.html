@@ -88,6 +88,13 @@
           </button>
         </div>
 
+        <label class="workspace-filter">
+          <span class="workspace-filter-label">工作区</span>
+          <select id="workspace-filter" aria-label="按工作区筛选会话" title="按工作区筛选会话">
+            <option value="">所有工作区</option>
+          </select>
+        </label>
+
         <div class="sidebar-summary">
           <h2 id="master-title" title="活动会话">活动会话</h2>
         </div>
@@ -149,13 +156,17 @@
         <section class="chat-toolbar">
           <div class="toolbar-group">
             <label class="control">
-              <span>最近轮次</span>
-              <input id="rounds-input" type="number" min="1" step="1" value="1">
+              <span>阅读方式</span>
+              <select id="reader-mode">
+                <option value="snapshot">首尾速览</option>
+                <option value="recent">最近轮次</option>
+                <option value="all">全部轮次</option>
+              </select>
             </label>
 
-            <label class="toggle">
-              <input id="all-rounds-toggle" type="checkbox" checked>
-              <span>全部轮次</span>
+            <label class="control">
+              <span>最近轮次</span>
+              <input id="rounds-input" type="number" min="1" step="1" value="1">
             </label>
           </div>
 
@@ -181,6 +192,9 @@
               <div class="transcript-toolbar-group">
                 <button class="toolbar-button" id="expand-tools-button" type="button">展开过程</button>
                 <button class="toolbar-button" id="collapse-tools-button" type="button">收起过程</button>
+                <button class="toolbar-button" id="copy-analysis-brief-button" type="button">复制完整分析包</button>
+                <button class="toolbar-button" id="optimizer-handoff-button" type="button">交给优化 Skill</button>
+                <button class="toolbar-button" id="run-codex-analysis-button" type="button">运行 Codex 分析</button>
                 <p class="transcript-shortcut-hint">消息跳转 <kbd>[</kbd> / <kbd>]</kbd></p>
               </div>
               <p class="transcript-stats" id="transcript-stats">-</p>
@@ -203,6 +217,39 @@
                 </div>
                 <ol class="task-timeline" id="task-timeline"></ol>
               </div>
+            </section>
+            <section class="optimization-analysis-card" id="optimization-analysis-card" hidden aria-label="优化分析">
+              <div class="optimization-analysis-head">
+                <div>
+                  <p class="optimization-analysis-kicker">Evidence · Proposal · Benchmark</p>
+                  <h3>优化分析</h3>
+                  <p class="optimization-analysis-note" id="optimization-analysis-note">-</p>
+                </div>
+                <span class="optimization-analysis-state" id="optimization-analysis-state">-</span>
+              </div>
+              <div class="optimization-analysis-summary" id="optimization-analysis-summary"></div>
+              <div class="optimization-analysis-columns">
+                <section>
+                  <h4>已记录事实</h4>
+                  <ul class="optimization-analysis-list" id="optimization-observations"></ul>
+                </section>
+                <section>
+                  <h4>建议的下一步</h4>
+                  <ul class="optimization-analysis-list" id="optimization-recommendations"></ul>
+                </section>
+              </div>
+              <details class="optimization-trace" id="optimization-trace">
+                <summary>
+                  <span>任务执行轨迹</span>
+                  <span class="optimization-trace-note" id="optimization-trace-note">-</span>
+                </summary>
+                <ol class="optimization-trace-list" id="optimization-trace-entries"></ol>
+              </details>
+              <details class="optimization-agent-result" id="optimization-agent-result" hidden>
+                <summary>Codex 分析结果</summary>
+                <pre id="optimization-agent-result-text"></pre>
+              </details>
+              <p class="optimization-analysis-disclaimer">这是本地日志的证据摘要，不会自动修改文档、Skill 或 `AGENTS.md`。</p>
             </section>
             <section class="transcript-token-card" id="transcript-token-card" hidden>
               <div class="transcript-token-head">
@@ -241,9 +288,45 @@
               <div class="transcript-token-rail-track" id="transcript-token-rail-track"></div>
             </aside>
           </div>
+          <section class="campaign-card" id="campaign-card" aria-label="实时优化 campaign">
+            <div class="campaign-head">
+              <div>
+                <p class="campaign-kicker">Live · Worker · Reviewer</p>
+                <h3>优化 Campaign</h3>
+                <p class="campaign-note" id="campaign-note">加载本机 campaign…</p>
+              </div>
+              <span class="campaign-state" id="campaign-state">观察中</span>
+            </div>
+            <div class="campaign-list" id="campaign-list"></div>
+            <div class="campaign-summary" id="campaign-summary"></div>
+            <div class="campaign-columns">
+              <section>
+                <h4>当前 overlay</h4>
+                <pre id="campaign-overlay">尚未选择 campaign。</pre>
+              </section>
+              <section>
+                <h4>worker 泳道</h4>
+                <ol class="campaign-events" id="campaign-worker-lane"></ol>
+              </section>
+              <section>
+                <h4>reviewer 泳道与实际检查点</h4>
+                <ol class="campaign-events" id="campaign-reviewer-lane"></ol>
+              </section>
+              <section>
+                <h4>验证证据与补丁</h4>
+                <ol class="campaign-events" id="campaign-events"></ol>
+              </section>
+            </div>
+            <p class="campaign-disclaimer">浏览器只观察和复制交接请求；可测 worker/reviewer 由前台 Codex Skill 通过 CSR 启动，浏览器不会后台启动 Codex。</p>
+          </section>
         </section>
       </section>
     </main>
+
+    <section class="delete-undo-toast" id="delete-undo-toast" role="status" aria-live="polite" aria-atomic="true" hidden>
+      <p id="delete-undo-message"></p>
+      <button id="undo-delete-button" type="button">撤销</button>
+    </section>
 
     <script type="module" src="/assets/app.js"></script>
   </body>

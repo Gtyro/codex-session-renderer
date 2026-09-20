@@ -13,6 +13,7 @@ import {
   formatSkillMessageForPresentation,
   parseSkillTriggerMessage,
   formatUserMessageForPresentation,
+  parseIdeContextMessagePresentation,
   parseSkillMessagePresentation,
   parseUserMessagePresentation
 } from "../src/shared/message-presentation.js";
@@ -54,9 +55,89 @@ Please inspect this log file.
   const formatted = formatUserMessageForPresentation(source);
 
   assert.match(formatted, /> \*\*Attached file\*\*/);
+  assert.match(formatted, /`application.log` — `\/workspace\/demo\/logs\/application.log`/);
+  assert.doesNotMatch(formatted, /\n> - /);
   assert.doesNotMatch(formatted, /# Files mentioned by the user:/);
   assert.doesNotMatch(formatted, /# My request for Codex:/);
   assert.match(formatted, /Please inspect this log file./);
+});
+
+test("parseUserMessagePresentation accepts historical heading-style attachments", () => {
+  const parsed = parseUserMessagePresentation(`
+# Files mentioned by the user:
+
+## example.py: /workspace/demo/src/example.py
+
+## My request for Codex:
+
+Please modify this example program.
+`);
+
+  assert.deepEqual(parsed, {
+    preambleText: "",
+    requestText: "Please modify this example program.",
+    attachments: [
+      {
+        label: "example.py",
+        path: "/workspace/demo/src/example.py"
+      }
+    ]
+  });
+});
+
+test("parseIdeContextMessagePresentation separates IDE metadata from the user request", () => {
+  const parsed = parseIdeContextMessagePresentation(`
+# Context from my IDE setup:
+
+## Active file: src/main.py
+
+## Open tabs:
+- main.py: src/main.py
+- application.log: logs/application.log
+
+## My request for Codex:
+python main.py
+ExampleError: sample failure
+
+1. How can this error be resolved?
+`.trim());
+
+  assert.deepEqual(parsed, {
+    activeFile: "src/main.py",
+    openTabs: [
+      { label: "main.py", path: "src/main.py" },
+      { label: "application.log", path: "logs/application.log" }
+    ],
+    otherContextText: "",
+    requestText: "python main.py\nExampleError: sample failure\n\n1. How can this error be resolved?"
+  });
+});
+
+test("formatted IDE context messages render metadata as a compact callout", () => {
+  const source = `
+# Context from my IDE setup:
+
+## Active file: src/main.py
+
+## Open tabs:
+- main.py: src/main.py
+- application.log: logs/application.log
+
+## My request for Codex:
+python main.py
+ExampleError: sample failure
+
+1. How can this error be resolved?
+`.trim();
+  const formatted = formatUserMessageForPresentation(source);
+
+  assert.match(formatted, /> \*\*IDE context\*\*/);
+  assert.match(formatted, /\*\*Active file:\*\* `src\/main.py`/);
+  assert.match(formatted, /\*\*Open tabs:\*\*/);
+  assert.match(formatted, /`application.log` — `logs\/application.log`/);
+  assert.doesNotMatch(formatted, /# Context from my IDE setup:/);
+  assert.doesNotMatch(formatted, /## My request for Codex:/);
+  assert.match(formatted, /ExampleError/);
 });
 
 test("formatLiteralImageMarkersForPresentation renders literal image markers as inline code", () => {
@@ -205,6 +286,149 @@ Please inspect this log file.
   assert.doesNotMatch(markdown, /# Files mentioned by the user:/);
   assert.match(interactive.items[0].renderedHtml, /<blockquote>/);
   assert.doesNotMatch(interactive.items[0].renderedHtml, /Files mentioned by the user/);
+});
+
+test("session renderers present IDE context as metadata instead of markdown headings", () => {
+  const session = {
+    id: "session-demo",
+    filePath: "/tmp/session-demo.jsonl",
+    startedAt: "2026-06-23T00:00:00.000Z",
+    cwd: "/tmp",
+    source: "codex",
+    originator: "codex",
+    cliVersion: "0.0.0",
+    modelProvider: "openai",
+    items: [
+      {
+        kind: "message",
+        role: "user",
+        timestamp: "2026-06-23T00:00:00.000Z",
+        text: `
+# Context from my IDE setup:
+
+## Active file: src/main.py
+
+## Open tabs:
+- main.py: src/main.py
+- application.log: logs/application.log
+
+## My request for Codex:
+python main.py
+ExampleError: sample failure
+
+1. How can this error be resolved?
+`.trim()
+      }
+    ]
+  };
+
+  const markdown = sessionToMarkdown(session, {
+    mode: "full"
+  });
+  const interactive = buildInteractiveSession(session);
+
+  assert.match(markdown, /> \*\*IDE context\*\*/);
+  assert.doesNotMatch(markdown, /# Context from my IDE setup:/);
+  assert.match(interactive.items[0].renderedHtml, /<blockquote>/);
+  assert.match(interactive.items[0].renderedHtml, /Active file/);
+  assert.doesNotMatch(interactive.items[0].renderedHtml, /<h1>Context from my IDE setup:<\/h1>/);
+  assert.doesNotMatch(interactive.items[0].renderedHtml, /<h2>My request for Codex:<\/h2>/);
+});
+
+test("memory snapshots prioritize the actual request over IDE context", () => {
+  const session = {
+    id: "snapshot-ide-context",
+    items: [
+      {
+        kind: "message",
+        role: "user",
+        snapshotExcerpt: true,
+        text: `
+# Context from my IDE setup:
+
+## Active file: src/main.py
+
+## Open tabs:
+- main.py: src/main.py
+
+## My request for Codex:
+ExampleError: sample failure
+
+How can this error be resolved?
+`.trim()
+      }
+    ],
+    selection: { mode: "memory_snapshot" }
+  };
+
+  const interactive = buildInteractiveSession(session);
+
+  assert.match(interactive.items[0].renderedHtml, /ExampleError/);
+  assert.match(interactive.items[0].renderedHtml, /请解决这个编码错误/);
+  assert.doesNotMatch(interactive.items[0].renderedHtml, /IDE context/);
+  assert.doesNotMatch(interactive.items[0].renderedHtml, /Active file/);
+});
+
+test("memory snapshots render compact mentioned-file references beside the actual request", () => {
+  const session = {
+    id: "snapshot-attached-file",
+    items: [
+      {
+        kind: "message",
+        role: "user",
+        snapshotExcerpt: true,
+        text: `
+# Files mentioned by the user:
+
+## example.py: /workspace/demo/src/example.py
+
+## My request for Codex:
+
+Please modify this example program.
+`.trim()
+      }
+    ],
+    selection: { mode: "memory_snapshot" }
+  };
+
+  const interactive = buildInteractiveSession(session);
+
+  assert.match(interactive.items[0].renderedHtml, /Please modify this example program./);
+  assert.match(interactive.items[0].renderedHtml, /提及文件/);
+  assert.match(interactive.items[0].renderedHtml, /example\.py/);
+  assert.match(interactive.items[0].renderedHtml, /snapshot-file-reference-details/);
+  assert.match(interactive.items[0].renderedHtml, /\/workspace\/demo\/src\/example\.py/);
+  assert.doesNotMatch(interactive.items[0].renderedHtml, /Files mentioned by the user/);
+});
+
+test("memory snapshots extract Windows file line ranges from mentioned-file references", () => {
+  const session = {
+    id: "snapshot-windows-mentioned-file",
+    items: [
+      {
+        kind: "message",
+        role: "user",
+        snapshotExcerpt: true,
+        text: `
+# Files mentioned by the user:
+
+## README.md: c:\\Users\\example\\Documents\\Project\\DemoApp\\README.md (lines 67-68)
+
+# My request for Codex:
+
+Is this step necessary? The dependency should already be installed.
+`.trim()
+      }
+    ],
+    selection: { mode: "memory_snapshot" }
+  };
+
+  const interactive = buildInteractiveSession(session);
+
+  assert.match(interactive.items[0].renderedHtml, /README\.md/);
+  assert.match(interactive.items[0].renderedHtml, /第 67–68 行/);
+  assert.match(interactive.items[0].renderedHtml, /c:\\Users\\example\\Documents\\Project\\DemoApp\\README\.md/);
+  assert.match(interactive.items[0].renderedHtml, /Is this step necessary? The dependency should already be installed./);
 });
 
 test("interactive session renders structured image attachments as image cards", () => {

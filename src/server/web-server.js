@@ -3,6 +3,7 @@ import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import os from "node:os";
+import path from "node:path";
 import { promisify } from "node:util";
 import {
   archiveSession,
@@ -21,6 +22,15 @@ import {
   buildSessionListPayload,
   buildSessionPayload
 } from "../core/session-view-model.js";
+import { deriveOptimizationAnalysis } from "../core/optimization-analysis.js";
+import { runReadOnlyCodexAnalysis } from "../core/codex-analysis-runner.js";
+import {
+  getDefaultCampaignsDir,
+  listCampaigns,
+  readCampaign,
+  readCampaignEvents
+} from "../core/campaign-store.js";
+import { buildOptimizationHandoff } from "../core/session-resolver.js";
 import {
   getRawRequestPathname,
   getStaticContentType,
@@ -223,9 +233,7 @@ function createBrowserClientController(server, options = {}) {
   let shutdownRequested = false;
   let shutdownTimer = null;
   const pruneTimer = setInterval(() => {
-    if (pruneStaleClients()) {
-      scheduleShutdownIfIdle();
-    }
+    pruneStaleClients();
   }, pruneIntervalMs);
 
   pruneTimer.unref?.();
@@ -272,6 +280,10 @@ function createBrowserClientController(server, options = {}) {
       stopTimers();
       server.close(() => {});
       server.closeIdleConnections?.();
+      // A keep-alive probe is not a tracked browser client. Close it as well so
+      // an idle server cannot remain reachable solely because a diagnostics
+      // client keeps reusing the same connection.
+      server.closeAllConnections?.();
     }, shutdownDelayMs);
 
     shutdownTimer.unref?.();
@@ -349,6 +361,60 @@ function sendError(response, statusCode, error) {
   });
 }
 
+function parseEventCursor(value) {
+  const parsed = Number.parseInt(value ?? "", 10);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : 0;
+}
+
+function parseCampaignPath(pathname, suffix = "") {
+  const matched = String(pathname ?? "").match(
+    new RegExp(`^/api/campaigns/([^/]+)${suffix}$`, "u")
+  );
+  return matched ? decodeURIComponent(matched[1]) : null;
+}
+
+async function serveCampaignEventStream(request, response, campaignsDir, id, after) {
+  await readCampaign({ rootDir: campaignsDir, id });
+  let cursor = after;
+  let reading = false;
+  let closed = false;
+
+  response.writeHead(200, {
+    "content-type": "text/event-stream; charset=utf-8",
+    "cache-control": "no-cache, no-transform",
+    connection: "keep-alive"
+  });
+  response.write("retry: 1000\n\n");
+
+  const flush = async () => {
+    if (closed || reading) {
+      return;
+    }
+    reading = true;
+    try {
+      const events = await readCampaignEvents({ rootDir: campaignsDir, id, after: cursor });
+      events.forEach((event) => {
+        cursor = Math.max(cursor, Number(event.seq) || cursor);
+        response.write(`id: ${cursor}\nevent: campaign\ndata: ${JSON.stringify(event)}\n\n`);
+      });
+    } catch (error) {
+      response.write(`event: error\ndata: ${JSON.stringify({ error: error.message })}\n\n`);
+    } finally {
+      reading = false;
+    }
+  };
+
+  await flush();
+  const timer = setInterval(() => {
+    flush().catch(() => {});
+  }, 700);
+  timer.unref?.();
+  request.once("close", () => {
+    closed = true;
+    clearInterval(timer);
+  });
+}
+
 async function readJsonBody(request) {
   const chunks = [];
   let size = 0;
@@ -366,6 +432,24 @@ async function readJsonBody(request) {
   }
 
   return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+}
+
+function buildAnalysisSearchParams(body = {}) {
+  const searchParams = new URLSearchParams();
+
+  ["location", "relativePath", "rounds", "view"].forEach((key) => {
+    if (typeof body[key] === "string" || typeof body[key] === "number") {
+      searchParams.set(key, String(body[key]));
+    }
+  });
+
+  ["all", "includeContext", "includeDeveloper", "includeReasoning"].forEach((key) => {
+    if (typeof body[key] === "boolean") {
+      searchParams.set(key, body[key] ? "1" : "0");
+    }
+  });
+
+  return searchParams;
 }
 
 async function serveStaticAsset(response, pathname) {
@@ -399,7 +483,7 @@ async function serveStaticAsset(response, pathname) {
   }
 }
 
-async function handleApiRequest(request, response, url, roots, browserClientController) {
+async function handleApiRequest(request, response, url, roots, browserClientController, campaignsDir) {
   if (request.method === "POST" && url.pathname === "/api/browser-client/open") {
     sendJson(response, 200, browserClientController.registerClient());
     return true;
@@ -443,6 +527,87 @@ async function handleApiRequest(request, response, url, roots, browserClientCont
   if (request.method === "GET" && url.pathname === "/api/session-detail") {
     const payload = await buildSessionPayload(roots, url.searchParams);
     sendJson(response, 200, buildSessionDetailPayload(payload));
+    return true;
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/session-optimization-analysis") {
+    const body = await readJsonBody(request);
+    const requestedView = body.view;
+    const analysisSearchParams = buildAnalysisSearchParams(body);
+    analysisSearchParams.set("view", "all");
+    const payload = await buildSessionPayload(roots, analysisSearchParams);
+    const analysis = {
+      ...deriveOptimizationAnalysis(payload.session),
+      traceJumpsAvailable: requestedView === "all"
+    };
+    sendJson(response, 200, {
+      analysis,
+      sessionId: payload.session.id
+    });
+    return true;
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/session-analysis") {
+    const body = await readJsonBody(request);
+    const analysisSearchParams = buildAnalysisSearchParams(body);
+    // A Codex review needs the complete execution trail even when the browser
+    // is currently showing the compact first-and-last request view.
+    analysisSearchParams.set("view", "all");
+    const payload = await buildSessionPayload(roots, analysisSearchParams);
+    const analysis = deriveOptimizationAnalysis(payload.session);
+    const result = await runReadOnlyCodexAnalysis({
+      cwd: payload.session.cwd,
+      prompt: analysis.agentBrief
+    });
+    sendJson(response, 200, {
+      result,
+      sessionId: payload.session.id
+    });
+    return true;
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/session-optimizer-handoff") {
+    const body = await readJsonBody(request);
+    const payload = await buildSessionPayload(roots, buildAnalysisSearchParams(body));
+    const firstPrompt = payload.session.items.find(
+      (item) => item?.kind === "message" && item.role === "user"
+    )?.text;
+    const handoff = buildOptimizationHandoff({
+      id: payload.session.id,
+      threadName: payload.record.threadName,
+      firstPrompt,
+      cwd: payload.session.cwd
+    });
+    sendJson(response, 200, { handoff, sessionId: payload.session.id });
+    return true;
+  }
+
+  if (request.method === "GET" && url.pathname === "/api/campaigns") {
+    sendJson(response, 200, { campaigns: await listCampaigns({ rootDir: campaignsDir }) });
+    return true;
+  }
+
+  const streamCampaignId = request.method === "GET" ? parseCampaignPath(url.pathname, "/stream") : null;
+  if (streamCampaignId) {
+    await serveCampaignEventStream(request, response, campaignsDir, streamCampaignId, parseEventCursor(url.searchParams.get("after")));
+    return true;
+  }
+
+  const eventCampaignId = request.method === "GET" ? parseCampaignPath(url.pathname, "/events") : null;
+  if (eventCampaignId) {
+    sendJson(response, 200, {
+      events: await readCampaignEvents({
+        rootDir: campaignsDir,
+        id: eventCampaignId,
+        after: parseEventCursor(url.searchParams.get("after"))
+      })
+    });
+    return true;
+  }
+
+  const campaignId = request.method === "GET" ? parseCampaignPath(url.pathname) : null;
+  if (campaignId) {
+    sendJson(response, 200, { campaign: await readCampaign({ rootDir: campaignsDir, id: campaignId }) });
     return true;
   }
 
@@ -539,7 +704,7 @@ async function handleApiRequest(request, response, url, roots, browserClientCont
   return false;
 }
 
-function createRequestHandler(host, port, roots, browserClientController) {
+function createRequestHandler(host, port, roots, browserClientController, campaignsDir) {
   return async (request, response) => {
     if (!request.url) {
       sendError(response, 400, "Missing request URL.");
@@ -555,7 +720,7 @@ function createRequestHandler(host, port, roots, browserClientController) {
         return;
       }
 
-      if (await handleApiRequest(request, response, url, roots, browserClientController)) {
+      if (await handleApiRequest(request, response, url, roots, browserClientController, campaignsDir)) {
         return;
       }
 
@@ -583,6 +748,7 @@ async function listenOnPort(server, host, port) {
 
 export async function startWebServer(options = {}) {
   const roots = getSessionRoots(options);
+  const campaignsDir = path.resolve(options.campaignsDir || getDefaultCampaignsDir());
   const host = options.host || "127.0.0.1";
   const defaultPort = Number.isFinite(options.defaultPort) ? options.defaultPort : DEFAULT_WEB_PORT;
   const hasExplicitPort = Number.isFinite(options.port);
@@ -604,7 +770,7 @@ export async function startWebServer(options = {}) {
 
     const server = http.createServer();
     const browserClientController = createBrowserClientController(server, options);
-    server.on("request", createRequestHandler(host, candidatePort, roots, browserClientController));
+    server.on("request", createRequestHandler(host, candidatePort, roots, browserClientController, campaignsDir));
 
     try {
       await listenOnPort(server, host, candidatePort);
@@ -619,6 +785,7 @@ export async function startWebServer(options = {}) {
         preferredPort,
         fallbackUsed: canFallbackToRandomPort && resolvedPort !== preferredPort,
         roots,
+        campaignsDir,
         url: `http://${host}:${resolvedPort}`
       };
     } catch (error) {

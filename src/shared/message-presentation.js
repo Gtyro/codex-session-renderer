@@ -16,15 +16,17 @@ function trimOuterBlankLines(lines) {
   return nextLines;
 }
 
-function normalizeHeading(line) {
-  return line
+function getHeadingText(line) {
+  return String(line ?? "")
     .trim()
     .replace(/^#{1,6}\s+/, "")
     .replace(/^\*\*(.*)\*\*$/, "$1")
     .replace(/^__(.*)__$/, "$1")
-    .replace(/:+$/, "")
-    .trim()
-    .toLowerCase();
+    .trim();
+}
+
+function normalizeHeading(line) {
+  return getHeadingText(line).replace(/:+$/, "").trim().toLowerCase();
 }
 
 function isHeading(line, expected) {
@@ -38,7 +40,7 @@ function parseAttachmentLine(line) {
     return null;
   }
 
-  const label = match[1]?.trim();
+  const label = getHeadingText(match[1]);
   const path = match[2]?.trim();
 
   if (!label || !path) {
@@ -49,6 +51,16 @@ function parseAttachmentLine(line) {
     label,
     path
   };
+}
+
+function parseIdeActiveFileLine(line) {
+  const match = getHeadingText(line).match(/^active file\s*:\s*(.+)$/iu);
+
+  return match?.[1]?.trim() || null;
+}
+
+function isMarkdownHeadingLine(line) {
+  return /^\s*#{1,6}\s+/u.test(String(line ?? ""));
 }
 
 function toInlineCode(value) {
@@ -408,26 +420,135 @@ export function parseUserMessagePresentation(text) {
   };
 }
 
+export function parseIdeContextMessagePresentation(text) {
+  const lines = normalizeText(text).split("\n");
+  const contextHeadingIndex = lines.findIndex((line) => isHeading(line, "context from my ide setup"));
+
+  if (contextHeadingIndex === -1) {
+    return null;
+  }
+
+  const requestHeadingIndex = lines.findIndex(
+    (line, index) => index > contextHeadingIndex && isHeading(line, "my request for codex")
+  );
+
+  if (requestHeadingIndex === -1) {
+    return null;
+  }
+
+  const requestLines = trimOuterBlankLines(lines.slice(requestHeadingIndex + 1));
+
+  if (requestLines.length === 0) {
+    return null;
+  }
+
+  const contextLines = trimOuterBlankLines(lines.slice(contextHeadingIndex + 1, requestHeadingIndex));
+  const openTabs = [];
+  const otherContextLines = [];
+  let activeFile = null;
+  let index = 0;
+
+  while (index < contextLines.length) {
+    const line = contextLines[index];
+    const parsedActiveFile = parseIdeActiveFileLine(line);
+
+    if (parsedActiveFile) {
+      activeFile = activeFile || parsedActiveFile;
+      index += 1;
+      continue;
+    }
+
+    if (isHeading(line, "open tabs")) {
+      index += 1;
+
+      while (index < contextLines.length && !isMarkdownHeadingLine(contextLines[index])) {
+        const tabLine = contextLines[index];
+
+        if (tabLine.trim()) {
+          const tab = parseAttachmentLine(tabLine);
+
+          if (tab) {
+            openTabs.push(tab);
+          } else {
+            otherContextLines.push(tabLine);
+          }
+        }
+
+        index += 1;
+      }
+
+      continue;
+    }
+
+    if (line.trim()) {
+      otherContextLines.push(line);
+    }
+
+    index += 1;
+  }
+
+  return {
+    activeFile,
+    openTabs,
+    otherContextText: otherContextLines.join("\n"),
+    requestText: requestLines.join("\n")
+  };
+}
+
+function formatIdeContextMessageForPresentation(parsed) {
+  const calloutLines = ["> **IDE context**", ">"];
+
+  if (parsed.activeFile) {
+    calloutLines.push(`> - **Active file:** ${toInlineCode(parsed.activeFile)}`);
+  }
+
+  if (parsed.openTabs.length > 0) {
+    calloutLines.push("> - **Open tabs:**");
+
+    parsed.openTabs.forEach((tab) => {
+      calloutLines.push(`>   - ${toInlineCode(tab.label)} — ${toInlineCode(tab.path)}`);
+    });
+  }
+
+  if (parsed.otherContextText) {
+    calloutLines.push(">", "> **Other IDE context:**", ">", "> ~~~text");
+    parsed.otherContextText.split("\n").forEach((line) => {
+      calloutLines.push(`> ${line}`);
+    });
+    calloutLines.push("> ~~~");
+  }
+
+  return formatLiteralProtocolMarkersForPresentation(
+    [calloutLines.join("\n"), parsed.requestText].filter(Boolean).join("\n\n")
+  );
+}
+
 export function formatUserMessageForPresentation(text) {
+  const ideContext = parseIdeContextMessagePresentation(text);
+
+  if (ideContext) {
+    return formatIdeContextMessageForPresentation(ideContext);
+  }
+
   const parsed = parseUserMessagePresentation(text);
 
   if (!parsed) {
     return formatLiteralProtocolMarkersForPresentation(text);
   }
 
-  const calloutLines = [
-    `> **${parsed.attachments.length === 1 ? "Attached file" : `Attached files (${parsed.attachments.length})`}**`,
-    ">"
-  ];
-
-  parsed.attachments.forEach((attachment, index) => {
-    calloutLines.push(`> - ${toInlineCode(attachment.label)}  `);
-    calloutLines.push(`>   ${toInlineCode(attachment.path)}`);
-
-    if (index < parsed.attachments.length - 1) {
-      calloutLines.push(">");
-    }
-  });
+  const calloutLines =
+    parsed.attachments.length === 1
+      ? [
+          `> **Attached file** · ${toInlineCode(parsed.attachments[0].label)} — ${toInlineCode(
+            parsed.attachments[0].path
+          )}`
+        ]
+      : [
+          `> **Attached files (${parsed.attachments.length})**`,
+          ...parsed.attachments.map(
+            (attachment) => `> - ${toInlineCode(attachment.label)} — ${toInlineCode(attachment.path)}`
+          )
+        ];
 
   return formatLiteralProtocolMarkersForPresentation(
     [parsed.preambleText, calloutLines.join("\n"), parsed.requestText].filter(Boolean).join("\n\n")

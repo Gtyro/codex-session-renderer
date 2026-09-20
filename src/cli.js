@@ -14,6 +14,7 @@ import { installBundledFonts } from "./core/font-assets.js";
 import { renderMarkdownDocument } from "./render/html.js";
 import { screenshotHtmlWithOptions } from "./render/png-playwright.js";
 import { startWebServer } from "./server/web-server.js";
+import { isOptimizerCliCommand, runOptimizerCli } from "./core/optimizer-cli.js";
 
 const CLI_COMMANDS = ["codex-session-renderer", "csr"];
 const COMPLETION_SHELLS = ["bash", "zsh", "fish"];
@@ -28,6 +29,13 @@ function printHelp() {
   console.log(`Usage:
 ${commandExamples}
 
+Optimizer data-plane commands:
+  csr sessions search --query <words> [--json]
+  csr sessions pick --query <words>
+  csr session evidence --id <session-id>
+  csr campaign create --cwd <path> --intent <text> --task <task> [--task <task>] [--disposable-workspace]
+  csr campaign <archive|restore|attach|asset|status|run|events|overlay|validate|measure|patch|rollback|bridge> ...
+
 Options:
   --install-fonts               Download the pinned Chinese font assets into this install
   --serve                       Start the built-in web UI for browsing and managing sessions
@@ -37,6 +45,9 @@ Options:
   --id <session-id>             Render a specific session by ID or unique ID fragment
   --sessions-dir <path>         Override the default sessions dir
   --archived-sessions-dir <p>   Override the default archived sessions dir
+  --campaigns-dir <path>        Override the local optimizer campaign store
+  --disposable-workspace         Declare the campaign cwd as an agent-owned temporary directory; archive removes it
+  --disposable-execution-cwd     Declare a worker --execution-cwd as temporary; CSR removes it after the run
   --output-dir <path>           Write files into this directory (default: ./output)
   --width <px>                  Screenshot viewport width in pixels (default: 1440)
   --rounds <n>                  Include only the most recent n conversation rounds (default: 1)
@@ -69,6 +80,7 @@ function parseArgs(argv) {
     id: null,
     sessionsDir: getDefaultSessionsDir(),
     archivedSessionsDir: getDefaultArchivedSessionsDir(),
+    campaignsDir: null,
     outputDir: path.resolve(process.cwd(), "output"),
     width: 1440,
     rounds: 1,
@@ -119,6 +131,10 @@ function parseArgs(argv) {
         options.archivedSessionsDir = path.resolve(
           argv[index] ?? fail("Missing value after --archived-sessions-dir")
         );
+        break;
+      case "--campaigns-dir":
+        index += 1;
+        options.campaignsDir = path.resolve(argv[index] ?? fail("Missing value after --campaigns-dir"));
         break;
       case "--output-dir":
         index += 1;
@@ -220,6 +236,7 @@ function getBashCompletionScript() {
     "--id",
     "--sessions-dir",
     "--archived-sessions-dir",
+    "--campaigns-dir",
     "--output-dir",
     "--width",
     "--rounds",
@@ -253,7 +270,7 @@ _codex_session_renderer_complete() {
       COMPREPLY=( $(compgen -W "$shells" -- "$cur") )
       return 0
       ;;
-    --sessions-dir|--archived-sessions-dir|--output-dir)
+    --sessions-dir|--archived-sessions-dir|--campaigns-dir|--output-dir)
       COMPREPLY=( $(compgen -d -- "$cur") )
       return 0
       ;;
@@ -287,6 +304,7 @@ _codex_session_renderer_complete() {
     '--id[Render a specific session by ID or unique ID fragment]:session id:' \\
     '--sessions-dir[Override the default sessions dir]:sessions directory:_files -/' \\
     '--archived-sessions-dir[Override the archived sessions dir]:archived sessions directory:_files -/' \\
+    '--campaigns-dir[Override the local optimizer campaign store]:campaign directory:_files -/' \\
     '--output-dir[Write files into this directory (default: ./output)]:output directory:_files -/' \\
     '--width[Screenshot viewport width in pixels (default: 1440)]:width:' \\
     '--rounds[Include only the most recent n conversation rounds (default: 1)]:round count:' \\
@@ -319,6 +337,7 @@ for cmd in ${CLI_COMMANDS.join(" ")}
   complete -c $cmd -l id -r -d "Render a specific session by ID or unique ID fragment"
   complete -c $cmd -l sessions-dir -r -a "(__fish_complete_directories)" -d "Override the default sessions dir"
   complete -c $cmd -l archived-sessions-dir -r -a "(__fish_complete_directories)" -d "Override the archived sessions dir"
+  complete -c $cmd -l campaigns-dir -r -a "(__fish_complete_directories)" -d "Override the local optimizer campaign store"
   complete -c $cmd -l output-dir -r -a "(__fish_complete_directories)" -d "Write files into this directory"
   complete -c $cmd -l width -r -d "Screenshot viewport width in pixels"
   complete -c $cmd -l rounds -r -d "Include only the most recent n conversation rounds"
@@ -479,7 +498,14 @@ async function renderSession(options) {
 }
 
 async function main() {
-  const options = parseArgs(process.argv.slice(2));
+  const argv = process.argv.slice(2);
+
+  if (isOptimizerCliCommand(argv)) {
+    await runOptimizerCli(argv);
+    return;
+  }
+
+  const options = parseArgs(argv);
 
   if (options.deprecatedFlags.length > 0) {
     for (const flag of options.deprecatedFlags) {
@@ -506,7 +532,8 @@ async function main() {
       host: options.host,
       port: options.port,
       sessionsDir: options.sessionsDir,
-      archivedSessionsDir: options.archivedSessionsDir
+      archivedSessionsDir: options.archivedSessionsDir,
+      campaignsDir: options.campaignsDir || undefined
     });
 
     console.log(`Web UI:   ${webServer.url}`);
