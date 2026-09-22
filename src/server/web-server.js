@@ -7,6 +7,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import {
   archiveSession,
+  cleanupTransientSessions,
   deleteSession,
   getSessionRoots,
   listSessions,
@@ -513,6 +514,7 @@ async function handleApiRequest(request, response, url, roots, browserClientCont
   }
 
   if (request.method === "GET" && url.pathname === "/api/sessions") {
+    await cleanupTransientSessions(roots);
     const items = await listSessions(roots);
     sendJson(response, 200, buildSessionListPayload(items, roots));
     return true;

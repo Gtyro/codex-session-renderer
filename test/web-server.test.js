@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { access, mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { startWebServer } from "../src/server/web-server.js";
 import { resolveWebAsset } from "../src/server/static-asset-routing.js";
 import { createCampaign } from "../src/core/campaign-store.js";
@@ -144,6 +144,40 @@ test("web server serves browser assets from the web root directory", async () =>
       recursive: true,
       force: true
     });
+  }
+});
+
+test("session list requests retain automatic transient-session cleanup", async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "csr-web-transient-"));
+  const sessionsDir = path.join(tempDir, "sessions");
+  const archivedSessionsDir = path.join(tempDir, "archived_sessions");
+  const pingPath = path.join(sessionsDir, "2026", "ping.jsonl");
+  await mkdir(path.dirname(pingPath), { recursive: true });
+  await mkdir(archivedSessionsDir, { recursive: true });
+  await writeFile(
+    pingPath,
+    `${[
+      { type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "ping" }] } }
+    ]
+      .map((entry) => JSON.stringify(entry))
+      .join("\n")}\n`,
+    "utf8"
+  );
+
+  let webServer = null;
+
+  try {
+    webServer = await startWebServer({ host: "127.0.0.1", port: 0, sessionsDir, archivedSessionsDir });
+    const response = await fetch(`${webServer.url}/api/sessions`);
+
+    assert.equal(response.status, 200);
+    assert.deepEqual((await response.json()).sessions, []);
+    await assert.rejects(access(pingPath));
+  } finally {
+    if (webServer) {
+      await stopServer(webServer.server);
+    }
+    await rm(tempDir, { recursive: true, force: true });
   }
 });
 

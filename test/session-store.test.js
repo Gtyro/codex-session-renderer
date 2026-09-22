@@ -6,6 +6,7 @@ import path from "node:path";
 import { access, mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import {
   archiveSession,
+  cleanupTransientSessions,
   getSessionRecord,
   listSessions,
   renameSession,
@@ -311,7 +312,7 @@ async function expectMissing(filePath) {
   await assert.rejects(access(filePath));
 }
 
-test("listSessions only deletes ping sessions from the active sessions directory", async () => {
+test("listSessions hides ping sessions without deleting source files", async () => {
   const tempDir = await mkdtemp(path.join(os.tmpdir(), "csr-session-store-"));
   const sessionsDir = path.join(tempDir, "sessions");
   const archivedSessionsDir = path.join(tempDir, "archived_sessions");
@@ -344,7 +345,7 @@ test("listSessions only deletes ping sessions from the active sessions directory
       ]
     );
     await assert.doesNotReject(readFile(normalFile, "utf8"));
-    await expectMissing(pingFile);
+    await assert.doesNotReject(readFile(pingFile, "utf8"));
     await assert.doesNotReject(readFile(pingPongFile, "utf8"));
   } finally {
     await rm(tempDir, { recursive: true, force: true });
@@ -412,7 +413,7 @@ test("listSessions hides guardian sessions with oversized metadata without readi
   }
 });
 
-test("listSessions deletes expired internal approval sessions from active and archived directories", async () => {
+test("listSessions hides expired internal approval sessions without deleting source files", async () => {
   const tempDir = await mkdtemp(path.join(os.tmpdir(), "csr-session-store-"));
   const sessionsDir = path.join(tempDir, "sessions");
   const archivedSessionsDir = path.join(tempDir, "archived_sessions");
@@ -436,6 +437,11 @@ test("listSessions deletes expired internal approval sessions from active and ar
 
     assert.equal(sessions.length, 1);
     assert.equal(sessions[0].filePath, normalFile);
+    await assert.doesNotReject(readFile(activeApprovalFile, "utf8"));
+    await assert.doesNotReject(readFile(archivedApprovalFile, "utf8"));
+
+    await cleanupTransientSessions({ sessionsDir, archivedSessionsDir });
+
     await expectMissing(activeApprovalFile);
     await expectMissing(archivedApprovalFile);
   } finally {
@@ -518,13 +524,13 @@ test("resolveSessionFile skips standalone ping sessions when resolving latest", 
     });
 
     assert.equal(resolved, normalFile);
-    await expectMissing(pingFile);
+    await assert.doesNotReject(readFile(pingFile, "utf8"));
   } finally {
     await rm(tempDir, { recursive: true, force: true });
   }
 });
 
-test("getSessionRecord treats a standalone ping session as deleted", async () => {
+test("getSessionRecord hides a standalone ping session without deleting it", async () => {
   const tempDir = await mkdtemp(path.join(os.tmpdir(), "csr-session-store-"));
   const sessionsDir = path.join(tempDir, "sessions");
 
@@ -541,7 +547,7 @@ test("getSessionRecord treats a standalone ping session as deleted", async () =>
       }),
       /Session was not found/
     );
-    await expectMissing(pingFile);
+    await assert.doesNotReject(readFile(pingFile, "utf8"));
   } finally {
     await rm(tempDir, { recursive: true, force: true });
   }
@@ -567,7 +573,7 @@ test("listSessions only inspects the file head when detecting ping sessions", as
 
     assert.equal(sessions.length, 1);
     assert.equal(sessions[0].relativePath, "2026/06/20/regular.jsonl");
-    await expectMissing(pingAtHeadFile);
+    await assert.doesNotReject(readFile(pingAtHeadFile, "utf8"));
   } finally {
     await rm(tempDir, { recursive: true, force: true });
   }

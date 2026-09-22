@@ -909,6 +909,31 @@ async function deleteTransientSessionFile(filePath, rootDir) {
   await removeEmptyParents(path.dirname(filePath), rootDir);
 }
 
+async function getSessionRetentionState(filePath, fileStat, location) {
+  const normalizedLocation = normalizeLocation(location);
+
+  if (
+    normalizedLocation === SESSION_LOCATIONS.sessions &&
+    (await isStandalonePingSessionFile(filePath, fileStat))
+  ) {
+    return "standalone-ping";
+  }
+
+  const internalApprovalInfo = await readInternalApprovalSessionInfo(filePath, fileStat);
+
+  if (internalApprovalInfo) {
+    return isExpiredInternalApprovalSession(internalApprovalInfo)
+      ? "expired-internal-approval"
+      : "internal-approval";
+  }
+
+  return "retained";
+}
+
+function shouldDeleteTransientSession(retentionState) {
+  return retentionState === "standalone-ping" || retentionState === "expired-internal-approval";
+}
+
 async function moveSessionFile(sourcePath, targetPath) {
   try {
     await rename(sourcePath, targetPath);
@@ -939,21 +964,7 @@ async function readSessionRecordIfRetained(filePath, rootDir, location, threadNa
     throw error;
   }
 
-  if (
-    normalizedLocation === SESSION_LOCATIONS.sessions &&
-    (await isStandalonePingSessionFile(filePath, fileStat))
-  ) {
-    await deleteTransientSessionFile(filePath, rootDir);
-    return null;
-  }
-
-  const internalApprovalInfo = await readInternalApprovalSessionInfo(filePath, fileStat);
-
-  if (internalApprovalInfo) {
-    if (isExpiredInternalApprovalSession(internalApprovalInfo)) {
-      await deleteTransientSessionFile(filePath, rootDir);
-    }
-
+  if ((await getSessionRetentionState(filePath, fileStat, normalizedLocation)) !== "retained") {
     return null;
   }
 
@@ -993,21 +1004,7 @@ async function filterRetainedSessionFiles(filePaths, rootDir, location) {
         throw error;
       }
 
-      if (
-        normalizedLocation === SESSION_LOCATIONS.sessions &&
-        (await isStandalonePingSessionFile(filePath, fileStat))
-      ) {
-        await deleteTransientSessionFile(filePath, rootDir);
-        return null;
-      }
-
-      const internalApprovalInfo = await readInternalApprovalSessionInfo(filePath, fileStat);
-
-      if (internalApprovalInfo) {
-        if (isExpiredInternalApprovalSession(internalApprovalInfo)) {
-          await deleteTransientSessionFile(filePath, rootDir);
-        }
-
+      if ((await getSessionRetentionState(filePath, fileStat, normalizedLocation)) !== "retained") {
         return null;
       }
 
@@ -1125,6 +1122,49 @@ export async function listSessions(options = {}) {
     .flat()
     .filter(Boolean)
     .sort((left, right) => right.modifiedMs - left.modifiedMs || left.id.localeCompare(right.id));
+}
+
+export async function cleanupTransientSessions(options = {}) {
+  const roots = getSessionRoots(options);
+  const locations = [
+    {
+      location: SESSION_LOCATIONS.sessions,
+      rootDir: roots.sessionsDir
+    },
+    {
+      location: SESSION_LOCATIONS.archived,
+      rootDir: roots.archivedSessionsDir
+    }
+  ];
+
+  await Promise.all(
+    locations.map(async ({ location, rootDir }) => {
+      const files = await collectSessionFiles(rootDir);
+      await Promise.all(
+        files.map(async (filePath) => {
+          let fileStat;
+
+          try {
+            fileStat = await stat(filePath);
+          } catch (error) {
+            if (error && error.code === "ENOENT") {
+              pingSessionCache.delete(filePath);
+              sessionMetadataCache.delete(filePath);
+              return;
+            }
+
+            throw error;
+          }
+
+          const retentionState = await getSessionRetentionState(filePath, fileStat, location);
+
+          if (shouldDeleteTransientSession(retentionState)) {
+            await deleteTransientSessionFile(filePath, rootDir);
+          }
+        })
+      );
+    })
+  );
 }
 
 export async function getSessionRecord({ location, relativePath, ...options }) {
