@@ -12,6 +12,21 @@ function getProjectRoot(context) {
   return context.extensionPath || path.resolve(__dirname, "..");
 }
 
+function getExtensionVersion(context) {
+  const contextVersion = context?.extension?.packageJSON?.version;
+
+  if (typeof contextVersion === "string" && contextVersion.trim()) {
+    return contextVersion.trim();
+  }
+
+  try {
+    const packageVersion = require(path.join(getProjectRoot(context), "package.json")).version;
+    return typeof packageVersion === "string" && packageVersion.trim() ? packageVersion.trim() : null;
+  } catch {
+    return null;
+  }
+}
+
 async function importModule(modulePath) {
   return import(pathToFileURL(modulePath).href);
 }
@@ -82,8 +97,13 @@ async function readRegistry(registryFile) {
   }
 }
 
-async function probeSharedServer(registry) {
-  if (!registry || typeof registry.url !== "string" || !registry.url) {
+async function probeSharedServer(registry, extensionVersion = null) {
+  if (
+    !registry ||
+    typeof registry.url !== "string" ||
+    !registry.url ||
+    registry.extensionVersion !== extensionVersion
+  ) {
     return false;
   }
 
@@ -125,13 +145,15 @@ function createSharedHandleFromRegistry(registry) {
     preferredPort: Number.isFinite(registry.preferredPort) ? registry.preferredPort : undefined,
     fallbackUsed: Boolean(registry.fallbackUsed),
     roots: registry.roots || {},
+    extensionVersion: registry.extensionVersion || null,
     url: registry.url
   };
 }
 
-function buildRegistryPayload(handle) {
+function buildRegistryPayload(handle, extensionVersion) {
   return {
     version: 1,
+    extensionVersion,
     host: handle.host,
     port: handle.port,
     preferredPort: handle.preferredPort,
@@ -155,12 +177,12 @@ async function createServerHandle(vscode, context) {
   });
 }
 
-async function createOwnedServerState(vscode, context, registryFile = null) {
+async function createOwnedServerState(vscode, context, registryFile = null, extensionVersion = null) {
   const handle = await createServerHandle(vscode, context);
 
   try {
     if (registryFile) {
-      await writeFile(registryFile, JSON.stringify(buildRegistryPayload(handle), null, 2));
+      await writeFile(registryFile, JSON.stringify(buildRegistryPayload(handle, extensionVersion), null, 2));
     }
   } catch (error) {
     await new Promise((resolve) => {
@@ -179,17 +201,18 @@ async function createOwnedServerState(vscode, context, registryFile = null) {
 }
 
 async function resolveServerState(vscode, context) {
+  const extensionVersion = getExtensionVersion(context);
   const sharedStorageDir = getSharedStorageDir(context);
 
   if (!sharedStorageDir) {
-    return createOwnedServerState(vscode, context);
+    return createOwnedServerState(vscode, context, null, extensionVersion);
   }
 
   await mkdir(sharedStorageDir, { recursive: true });
   const registryPaths = getRegistryPaths(sharedStorageDir);
   const existingRegistry = await readRegistry(registryPaths.registryFile);
 
-  if (existingRegistry && (await probeSharedServer(existingRegistry))) {
+  if (existingRegistry && (await probeSharedServer(existingRegistry, extensionVersion))) {
     return {
       ownership: "shared",
       handle: createSharedHandleFromRegistry(existingRegistry),
@@ -201,7 +224,7 @@ async function resolveServerState(vscode, context) {
     await rm(registryPaths.registryFile, { force: true });
   }
 
-  return createOwnedServerState(vscode, context, registryPaths.registryFile);
+  return createOwnedServerState(vscode, context, registryPaths.registryFile, extensionVersion);
 }
 
 async function isServerStateUsable(state) {
@@ -216,8 +239,9 @@ async function isServerStateUsable(state) {
   if (state.ownership === "shared") {
     return probeSharedServer({
       url: state.handle.url,
-      roots: state.handle.roots
-    });
+      roots: state.handle.roots,
+      extensionVersion: state.handle.extensionVersion
+    }, state.handle.extensionVersion);
   }
 
   return false;

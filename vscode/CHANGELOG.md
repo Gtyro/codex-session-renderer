@@ -3,6 +3,8 @@
 ## Unreleased
 
 - Detect Guardian sessions from the early metadata fields even when the metadata record itself is large.
+- Restart the shared browser server after an extension upgrade instead of reusing a server from an older extension version.
+- Fixed VSIX packaging so the extension includes the `markdown-it` runtime dependency and can start normally after installation.
 - Added deep-linked browser URLs that preserve the selected session, scope, search query, and reader options.
 - Grouped transcript activity into collapsible conversation rounds and added `[` / `]` jump navigation between user requests and final answers.
 - Improved transcript presentation for structured image attachments, attached-file callouts, and skill payloads.
@@ -49,6 +51,8 @@
 ### Unreleased
 
 - 即使首条元数据记录很大，也只从前部字段识别 Guardian 会话。
+- 扩展升级后会重新启动共享浏览器服务，不再复用旧扩展版本的服务进程。
+- 修复 VSIX 打包遗漏 `markdown-it` 运行时依赖，避免扩展安装后无法启动。
 - 新增深链接浏览器 URL，保留选中会话、scope、搜索词与阅读选项。
 - 会话正文现按可折叠的对话轮次组织过程内容，并支持用 `[` / `]` 在用户请求与助手最终回答之间跳转。
 - 优化结构化图片附件、文件提及摘要与技能负载的展示形式。

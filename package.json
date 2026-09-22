@@ -1,6 +1,6 @@
 {
   "name": "codex-session-renderer",
-  "version": "0.1.8",
+  "version": "0.1.11",
   "type": "module",
   "description": "Browser-first Codex session browser with export and VS Code integration.",
   "publisher": "gtyro",
@@ -98,6 +98,7 @@
     }
   },
   "scripts": {
+    "test": "node --test --test-concurrency=1",
     "render": "node ./src/cli.js",
     "web": "node ./src/cli.js --serve",
     "package:vsix": "node ./scripts/package-vsix.cjs",

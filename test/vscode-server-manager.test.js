@@ -222,6 +222,52 @@ test("server manager reuses the same shared server even when another window has 
   }
 });
 
+test("server manager does not reuse a shared server from a different extension version", async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "csr-vscode-manager-version-"));
+  const globalStorageDir = path.join(tempDir, "global-storage");
+  const roots = await createSessionRoots(tempDir, "version");
+  const ownerContext = {
+    extensionPath: repoRoot,
+    extension: {
+      packageJSON: {
+        version: "0.1.9"
+      }
+    },
+    globalStorageUri: {
+      fsPath: globalStorageDir
+    }
+  };
+  const upgradedContext = {
+    ...ownerContext,
+    extension: {
+      packageJSON: {
+        version: "0.1.10"
+      }
+    }
+  };
+  const vscode = createVscodeMock({
+    ...roots,
+    port: 0
+  });
+  const ownerManager = loadServerManager();
+  const upgradedManager = loadServerManager();
+
+  try {
+    const ownerUrls = await ownerManager.getBrowserUrls(vscode, ownerContext, "root");
+    const upgradedUrls = await upgradedManager.getBrowserUrls(vscode, upgradedContext, "root");
+
+    assert.notEqual(upgradedUrls.internalUrl, ownerUrls.internalUrl);
+    await assertSessionsEndpoint(upgradedUrls.internalUrl);
+  } finally {
+    await upgradedManager.stopServer().catch(() => {});
+    await ownerManager.stopServer().catch(() => {});
+    await rm(tempDir, {
+      recursive: true,
+      force: true
+    });
+  }
+});
+
 test("server manager recreates an auto-stopped shared server on the next browser open request", async () => {
   const tempDir = await mkdtemp(path.join(os.tmpdir(), "csr-vscode-manager-idle-"));
   const globalStorageDir = path.join(tempDir, "global-storage");
