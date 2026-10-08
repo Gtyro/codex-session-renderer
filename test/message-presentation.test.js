@@ -26,12 +26,12 @@ test("parseUserMessagePresentation extracts attachments and request text", () =>
 
 # My request for Codex:
 
-Please inspect this log file.
+请检查这个日志文件。
 `);
 
   assert.deepEqual(parsed, {
     preambleText: "",
-    requestText: "Please inspect this log file.",
+    requestText: "请检查这个日志文件。",
     attachments: [
       {
         label: "application.log",
@@ -49,7 +49,7 @@ application.log: /workspace/demo/logs/application.log
 
 # My request for Codex:
 
-Please inspect this log file.
+请检查这个日志文件。
 `.trim();
 
   const formatted = formatUserMessageForPresentation(source);
@@ -59,7 +59,7 @@ Please inspect this log file.
   assert.doesNotMatch(formatted, /\n> - /);
   assert.doesNotMatch(formatted, /# Files mentioned by the user:/);
   assert.doesNotMatch(formatted, /# My request for Codex:/);
-  assert.match(formatted, /Please inspect this log file./);
+  assert.match(formatted, /请检查这个日志文件。/);
 });
 
 test("parseUserMessagePresentation accepts historical heading-style attachments", () => {
@@ -70,12 +70,12 @@ test("parseUserMessagePresentation accepts historical heading-style attachments"
 
 ## My request for Codex:
 
-Please modify this example program.
+请修改这个程序。
 `);
 
   assert.deepEqual(parsed, {
     preambleText: "",
-    requestText: "Please modify this example program.",
+    requestText: "请修改这个程序。",
     attachments: [
       {
         label: "example.py",
@@ -99,7 +99,7 @@ test("parseIdeContextMessagePresentation separates IDE metadata from the user re
 python main.py
 ExampleError: sample failure
 
-1. How can this error be resolved?
+如何解决这个错误？
 `.trim());
 
   assert.deepEqual(parsed, {
@@ -109,7 +109,26 @@ ExampleError: sample failure
       { label: "application.log", path: "logs/application.log" }
     ],
     otherContextText: "",
-    requestText: "python main.py\nExampleError: sample failure\n\n1. How can this error be resolved?"
+    requestText: "python main.py\nExampleError: sample failure\n\n如何解决这个错误？"
+  });
+});
+
+test("parseIdeContextMessagePresentation accepts the compact request heading emitted by newer Codex sessions", () => {
+  const parsed = parseIdeContextMessagePresentation(`
+# Context from my IDE setup:
+
+## Active file: src/example.ts
+
+## My request:
+请检查示例页面。
+将演示按钮文字改为“继续”。
+`.trim());
+
+  assert.deepEqual(parsed, {
+    activeFile: "src/example.ts",
+    openTabs: [],
+    otherContextText: "",
+    requestText: "请检查示例页面。\n将演示按钮文字改为“继续”。"
   });
 });
 
@@ -127,7 +146,7 @@ test("formatted IDE context messages render metadata as a compact callout", () =
 python main.py
 ExampleError: sample failure
 
-1. How can this error be resolved?
+如何解决这个错误？
 `.trim();
   const formatted = formatUserMessageForPresentation(source);
 
@@ -271,7 +290,7 @@ application.log: /workspace/demo/logs/application.log
 
 # My request for Codex:
 
-Please inspect this log file.
+请检查这个日志文件。
 `.trim()
       }
     ]
@@ -316,7 +335,7 @@ test("session renderers present IDE context as metadata instead of markdown head
 python main.py
 ExampleError: sample failure
 
-1. How can this error be resolved?
+如何解决这个错误？
 `.trim()
       }
     ]
@@ -354,7 +373,7 @@ test("memory snapshots prioritize the actual request over IDE context", () => {
 ## My request for Codex:
 ExampleError: sample failure
 
-How can this error be resolved?
+如何解决这个错误？
 `.trim()
       }
     ],
@@ -364,7 +383,7 @@ How can this error be resolved?
   const interactive = buildInteractiveSession(session);
 
   assert.match(interactive.items[0].renderedHtml, /ExampleError/);
-  assert.match(interactive.items[0].renderedHtml, /请解决这个编码错误/);
+  assert.match(interactive.items[0].renderedHtml, /如何解决这个错误？/);
   assert.doesNotMatch(interactive.items[0].renderedHtml, /IDE context/);
   assert.doesNotMatch(interactive.items[0].renderedHtml, /Active file/);
 });
@@ -384,7 +403,7 @@ test("memory snapshots render compact mentioned-file references beside the actua
 
 ## My request for Codex:
 
-Please modify this example program.
+请修改这个程序。
 `.trim()
       }
     ],
@@ -393,7 +412,7 @@ Please modify this example program.
 
   const interactive = buildInteractiveSession(session);
 
-  assert.match(interactive.items[0].renderedHtml, /Please modify this example program./);
+  assert.match(interactive.items[0].renderedHtml, /请修改这个程序。/);
   assert.match(interactive.items[0].renderedHtml, /提及文件/);
   assert.match(interactive.items[0].renderedHtml, /example\.py/);
   assert.match(interactive.items[0].renderedHtml, /snapshot-file-reference-details/);
@@ -416,7 +435,7 @@ test("memory snapshots extract Windows file line ranges from mentioned-file refe
 
 # My request for Codex:
 
-Is this step necessary? The dependency should already be installed.
+这一步有必要吗？依赖应该已经安装。
 `.trim()
       }
     ],
@@ -428,7 +447,7 @@ Is this step necessary? The dependency should already be installed.
   assert.match(interactive.items[0].renderedHtml, /README\.md/);
   assert.match(interactive.items[0].renderedHtml, /第 67–68 行/);
   assert.match(interactive.items[0].renderedHtml, /c:\\Users\\example\\Documents\\Project\\DemoApp\\README\.md/);
-  assert.match(interactive.items[0].renderedHtml, /Is this step necessary? The dependency should already be installed./);
+  assert.match(interactive.items[0].renderedHtml, /这一步有必要吗？依赖应该已经安装。/);
 });
 
 test("interactive session renders structured image attachments as image cards", () => {

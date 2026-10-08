@@ -144,6 +144,21 @@ test("selectSessionMemorySnapshot keeps the first request and the last two reque
   assert.deepEqual(snapshot.tokenSnapshots, []);
 });
 
+test("selectSessionMemorySnapshot skips synthetic handoff summaries when pairing final answers", () => {
+  const session = {
+    id: "handoff-demo",
+    items: [
+      buildMessage("user", "当前请求"),
+      buildMessage("assistant", "## Handoff Summary\n\n内部交接内容", { phase: "final_answer" }),
+      buildMessage("assistant", "真实的最终回复", { phase: "final_answer" })
+    ]
+  };
+
+  const snapshot = selectSessionMemorySnapshot(session);
+
+  assert.deepEqual(snapshot.items.map((item) => item.text), ["当前请求", "真实的最终回复"]);
+});
+
 test("selectSessionMemorySnapshot falls back to the latest assistant progress when a request has no final answer", () => {
   const session = {
     id: "demo",
@@ -544,7 +559,7 @@ test("loadSession strips wrapper <image> markers around structured image blocks"
           content: [
             {
               type: "input_text",
-              text: "Please analyze this unsuccessful change."
+              text: "请分析这次未成功的修改。"
             },
             {
               type: "input_text",
@@ -569,7 +584,7 @@ test("loadSession strips wrapper <image> markers around structured image blocks"
     const [message] = session.items;
 
     assert.equal(message.kind, "message");
-    assert.equal(message.text, "Please analyze this unsuccessful change.\n\n[Image attachment: high]");
+    assert.equal(message.text, "请分析这次未成功的修改。\n\n[Image attachment: high]");
     assert.equal(
       message.contentBlocks.filter((block) => block.kind === "text" && /<\/?image>/.test(block.text)).length,
       0

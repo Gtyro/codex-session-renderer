@@ -33,6 +33,12 @@ function isHeading(line, expected) {
   return normalizeHeading(line) === expected;
 }
 
+function isUserRequestHeading(line) {
+  const heading = normalizeHeading(line);
+
+  return heading === "my request for codex" || heading === "my request";
+}
+
 function parseAttachmentLine(line) {
   const match = line.trim().match(/^(?:[-*+]\s*)?([^:\n]+):\s*(.+)$/u);
 
@@ -382,7 +388,7 @@ export function parseUserMessagePresentation(text) {
   }
 
   const requestHeadingIndex = lines.findIndex(
-    (line, index) => index > filesHeadingIndex && isHeading(line, "my request for codex")
+    (line, index) => index > filesHeadingIndex && isUserRequestHeading(line)
   );
 
   if (requestHeadingIndex === -1) {
@@ -429,7 +435,7 @@ export function parseIdeContextMessagePresentation(text) {
   }
 
   const requestHeadingIndex = lines.findIndex(
-    (line, index) => index > contextHeadingIndex && isHeading(line, "my request for codex")
+    (line, index) => index > contextHeadingIndex && isUserRequestHeading(line)
   );
 
   if (requestHeadingIndex === -1) {

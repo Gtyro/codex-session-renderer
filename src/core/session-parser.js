@@ -22,6 +22,16 @@ function normalizeText(value) {
     .trim();
 }
 
+function isSyntheticHandoffText(value) {
+  const text = String(value ?? "").trim();
+
+  return /^(?:##\s+Handoff Summary\b|##\s+Project and constraints\s*$|##\s+项目与约束\s*$)/imu.test(text);
+}
+
+function isSyntheticHandoffMessage(item) {
+  return item?.kind === "message" && item.role === "assistant" && isSyntheticHandoffText(item.text);
+}
+
 function looksLikeContextPrelude(text) {
   return (
     text.includes("# AGENTS.md instructions") ||
@@ -467,6 +477,10 @@ export async function loadSession(filePath, options = {}) {
         continue;
       }
 
+      if (role === "assistant" && isSyntheticHandoffText(text)) {
+        continue;
+      }
+
       if (role === "developer" && !options.includeDeveloper) {
         continue;
       }
@@ -551,6 +565,10 @@ function buildMessageFromJsonlEntry(entry, options = {}) {
   const { text, contentBlocks } = parseMessageBlocks(payload.content);
 
   if (!text && contentBlocks.length === 0) {
+    return null;
+  }
+
+  if (role === "assistant" && isSyntheticHandoffText(text)) {
     return null;
   }
 
@@ -961,7 +979,7 @@ function isConversationUserMessage(item) {
 }
 
 function isAssistantMessage(item) {
-  return item?.kind === "message" && item.role === "assistant";
+  return item?.kind === "message" && item.role === "assistant" && !isSyntheticHandoffMessage(item);
 }
 
 function isFinalAssistantMessage(item) {

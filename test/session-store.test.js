@@ -629,8 +629,8 @@ test("listSessions exposes the request as a display name when a thread title is 
 - example.py: scripts/example.py
 
 ## My request for Codex:
-The sample task is complete. Where is the entry point?
-I want to run the sample data.
+示例任务已完成，程序入口在哪里？
+我要试运行样例数据。
 `.trim();
 
   try {
@@ -650,7 +650,7 @@ I want to run the sample data.
     });
 
     assert.equal(sessions[0].threadName, threadName);
-    assert.equal(sessions[0].displayName, "The sample task is complete. Where is the entry point? I want to run the sample data.");
+    assert.equal(sessions[0].displayName, "示例任务已完成，程序入口在哪里？ 我要试运行样例数据。");
   } finally {
     await rm(tempDir, { recursive: true, force: true });
   }
